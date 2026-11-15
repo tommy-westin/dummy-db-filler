@@ -58,3 +58,35 @@ def test_load_example_and_change_generator():
     assert not at.exception
     col = at.session_state["project"].table("dbo.Patient").column("Telefon")
     assert col.generator == "constant" and col.manual
+
+
+def test_new_features_in_ui():
+    from dummyfiller import rules
+    from tests.test_features import sales
+
+    project = sales()
+    project.dirty = {"tables": ["dbo.Kund"], "pct": 10, "kinds": ["whitespace", "duplicates"]}
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.session_state["project"] = project
+    at.session_state["page"] = PAGES[2]
+    at.session_state["cur_table"] = "dbo.DimKund"
+    at.session_state["cur_col"] = "Telefon"
+    at.run()
+    assert not at.exception
+    assert any(c.label == "Generera flera versioner per rad" and c.value for c in at.checkbox)  # historik känns igen
+    next(b for b in at.button if b.label == "Spara regel").click().run()
+    assert not at.exception and rules.load_rules()[0]["pattern"] == "telefon"
+
+    at.session_state["page"] = PAGES[3]
+    at.run()
+    assert not at.exception
+    assert any("COUNT_BIG" in c.value for c in at.code)  # profilskriptet visas
+
+    at.session_state["page"] = PAGES[4]
+    at.run()
+    next(s for s in at.selectbox if s.label.startswith("Scenario")).select("liten").run()
+    next(b for b in at.button if b.label.startswith("Generera")).click().run()
+    assert not at.exception
+    res = at.session_state["result"]
+    assert len(res.data["dbo.KundOrder"].rows) == 20 and res.dirty_log
+    assert any(m.label == "Föräldralösa rader" and m.value == "0" for m in at.metric)

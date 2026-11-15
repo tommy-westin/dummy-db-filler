@@ -7,10 +7,11 @@ dependencies = [
     "faker>=30",
     "sqlalchemy>=2.0",
     "pyodbc>=5",
-    "streamlit>=1.40",
+    "streamlit>=1.50",
     "pyyaml>=6",
     "pandas>=2",
     "pyarrow>=15",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

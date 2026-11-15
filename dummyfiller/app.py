@@ -107,12 +107,16 @@ def smart_defaults(table: Table, col: Column, key: str) -> dict:
         d["decimals"] = col.scale
     if key == "list" and project.value_lists:
         d["list"] = next(iter(project.value_lists))
-    if key == "parent.lookup" and table.foreign_keys:
+    if "via" in d and table.foreign_keys:  # generatorer som utgår från en förälder: välj första relationen
         fk = table.foreign_keys[0]
         d["via"] = fk.columns[0]
         ref = project.table(fk.ref_table)
-        if ref:
+        if ref and key == "parent.lookup":
             d["column"] = next((c.name for c in ref.columns if c.name not in fk.ref_columns), ref.columns[0].name)
+        if ref and key == "date.after_parent":
+            d["column"] = next((c.name for c in ref.columns if c.kind in ("date", "datetime")), "")
+    if key == "choice.by":
+        d["column"] = next((c.name for c in table.columns if c is not col and c.generator in ("choice", "list")), d["column"])
     return d
 
 

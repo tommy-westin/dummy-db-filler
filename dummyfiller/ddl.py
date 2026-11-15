@@ -213,7 +213,7 @@ def parse_ddl(sql: str, default_schema: str = "dbo") -> tuple[list[Table], list[
         if not table.columns:
             warnings.append(f"{table.key}: inga kolumner kunde tolkas")
             continue
-        tables[table.key.lower()] = table
+        tables[f"{schema}.{name}".lower()] = table
 
     for m in re.finditer(rf"\bALTER\s+TABLE\s+(?:ONLY\s+)?({_NAME})(.*?)(?=;|\bGO\b|\bALTER\s+TABLE\b|\bCREATE\b|\Z)", sql, re.I | re.S):
         schema, name = _split_name(m.group(1), default_schema)
@@ -241,7 +241,7 @@ def parse_ddl(sql: str, default_schema: str = "dbo") -> tuple[list[Table], list[
     for table, name, cols, ref_name, ref_cols in pending_fks:
         rschema, rname = _split_name(ref_name, default_schema)
         ref = tables.get(f"{rschema}.{rname}".lower())
-        ref_key = ref.key if ref else f"{rschema}.{rname}"
+        ref_key = ref.key if ref else (f"{rschema}.{rname}" if rschema else rname)
         if not ref_cols and ref is not None:
             ref_cols = list(ref.primary_key)
         if not ref_cols or len(ref_cols) != len(cols):

@@ -161,21 +161,26 @@ def _test_pnr(ctx):
     vals = ctx.project.value_lists.get(name) if name else None
     if not vals:
         return None
-    perm = ctx.shared.get("pnr_perm")
-    if perm is None:
-        perm = ctx.shared["pnr_perm"] = list(range(len(vals)))
-        ctx.rng.shuffle(perm)
-    digits = "".join(ch for ch in vals[perm[(ctx.index + ctx.offset) % len(perm)]] if ch.isdigit())
-    if len(digits) == 10:
-        digits = ("20" if int(digits[:2]) <= ctx.today.year % 100 else "19") + digits
-    if len(digits) != 12:
-        return None
-    day = int(digits[6:8])
-    try:
-        born = date(int(digits[:4]), int(digits[4:6]), day - 60 if day > 60 else day)  # samordningsnummer har dag + 60
-    except ValueError:
-        return None
-    return born, int(digits[10]) % 2 == 0, digits[8:]
+    pool = ctx.shared.get("pnr_pool")
+    if pool is None:  # tolka listan en gång per tabell; ogiltiga rader hoppas över
+        pool = []
+        for raw in vals:
+            digits = "".join(ch for ch in raw if ch.isdigit())
+            if len(digits) == 10:
+                digits = ("20" if int(digits[:2]) <= ctx.today.year % 100 else "19") + digits
+            if len(digits) != 12:
+                continue
+            day = int(digits[6:8])
+            try:
+                born = date(int(digits[:4]), int(digits[4:6]), day - 60 if day > 60 else day)  # samordningsnummer har dag + 60
+            except ValueError:
+                continue
+            pool.append((born, int(digits[10]) % 2 == 0, digits[8:]))
+        ctx.rng.shuffle(pool)
+        ctx.shared["pnr_pool"] = pool
+    if not pool:
+        raise ValueError(f"värdelistan '{name}' innehåller inga giltiga personnummer (12 eller 10 siffror)")
+    return pool[(ctx.index + ctx.offset) % len(pool)]
 
 
 def company(ctx, group: str = "") -> dict:
