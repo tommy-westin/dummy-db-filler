@@ -28,7 +28,9 @@ from dummyfiller.model import CATEGORIES, DISTRIBUTIONS, Column, ForeignKey, Pro
 
 st.set_page_config(page_title="Dummyfiller", page_icon="🧪", layout="wide")
 ss = st.session_state
-PAGES = ["1. Källa", "2. Diagram", "3. Tabeller och relationer", "4. Kolumner", "5. Värdelistor", "6. Generatorer", "7. Generera"]
+SECTIONS = ["🧪 Skapa testdata", "📚 Domänbibliotek"]
+PAGES = ["1. Källa", "2. Diagram", "3. Finjustera (valfritt)", "4. Generera"]
+LIB_PAGES = ["Egna generatorer", "Regionens listor och kodverk", "Regler för kolumnnamn", "Lär från produktion", "Dela med teamet"]
 CAT_LABELS = list(CATEGORIES.values())
 CAT_BY_LABEL = {v: k for k, v in CATEGORIES.items()}
 DIST_LABELS = list(DISTRIBUTIONS.values())
@@ -89,10 +91,18 @@ if not ss.get("_linked"):  # direktlänk: http://localhost:8501/?projekt=projekt
             ss.flash.append(("error", f"Kunde inte öppna {qp['projekt']}: {e}"))
         del st.query_params["projekt"]  # annars skulle en omladdning läsa in filen igen ovanpå ändringarna
     if qp.get("steg", "").isdigit() and 1 <= int(qp["steg"]) <= len(PAGES):
-        ss.page = PAGES[int(qp["steg"]) - 1]
+        ss.section, ss.page = SECTIONS[0], PAGES[int(qp["steg"]) - 1]
+    elif qp.get("bibliotek", "").isdigit() and 1 <= int(qp["bibliotek"]) <= len(LIB_PAGES):
+        ss.section, ss.lib_page = SECTIONS[1], LIB_PAGES[int(qp["bibliotek"]) - 1]
 if "project" not in ss:  # länken gick inte att öppna
     open_last_project()
 project: Project = ss.project
+for _name, _counts in library.sync_shared():  # nya eller ändrade filer i teamets gemensamma mapp läses in automatiskt
+    if "fel" in _counts:
+        ss.flash.append(("error", f"Kunde inte läsa teamets bibliotek {_name}: {_counts['fel']}"))
+    else:
+        ss.flash.append(("info", f"Teamets domänbibliotek är uppdaterat från {_name}: "
+                                 + ", ".join(f"{v} {k}" for k, v in _counts.items() if v) + "."))
 library.refresh(project)
 GEN_LABELS = [label_of(k) for k in REGISTRY if not k.startswith(library.PREFIX + "__")]
 
@@ -302,15 +312,30 @@ def sidebar_projects():
 with st.sidebar:
     st.title("🧪 Dummyfiller")
     st.caption("Verklighetstrogen dummy-data utifrån dina scheman. Allt körs lokalt – ingen data hämtas från internet.")
-    page = st.radio("Steg", PAGES, key="page")
-    if st.query_params.get("steg") != str(PAGES.index(page) + 1):  # adressen visar steget, så att en omladdning stannar kvar
-        st.query_params["steg"] = str(PAGES.index(page) + 1)
+    section = st.radio("Avsnitt", SECTIONS, key="section", label_visibility="collapsed")
+    if section == SECTIONS[0]:
+        page = st.radio("Steg", PAGES, key="page")
+        want = {"steg": str(PAGES.index(page) + 1)}
+    else:
+        st.caption("Gäller alla projekt. Byggs upp en gång och delas med kollegorna – för att skapa testdata behöver du inte göra något här.")
+        page = st.radio("Domänbibliotek", LIB_PAGES, key="lib_page")
+        want = {"bibliotek": str(LIB_PAGES.index(page) + 1)}
+    if dict(st.query_params) != {**{k: v for k, v in st.query_params.items() if k not in ("steg", "bibliotek")}, **want}:
+        for k in ("steg", "bibliotek"):  # adressen visar sidan, så att en omladdning stannar kvar
+            if k in st.query_params and k not in want:
+                del st.query_params[k]
+        st.query_params.update(want)
     st.divider()
     sidebar_projects()
     st.divider()
-    included = [t for t in project.tables if t.include]
-    st.metric("Tabeller som genereras", f"{len(included)} av {len(project.tables)}")
-    st.metric("Rader totalt (ungefär)", f"{sum(estimated_rows(project, t) for t in included):,}".replace(",", " "))
+    if section == SECTIONS[0]:
+        included = [t for t in project.tables if t.include]
+        st.metric("Tabeller som genereras", f"{len(included)} av {len(project.tables)}")
+        st.metric("Rader totalt (ungefär)", f"{sum(estimated_rows(project, t) for t in included):,}".replace(",", " "))
+    n_gen = len(library.custom_generators())
+    n_lists = sum(library.is_overridden(s.key) for s in library.LIST_SPECS)
+    st.caption(f"📚 Domänbiblioteket: {n_gen} egna generatorer · {n_lists} regionala listor"
+               + (f" · kodverk: {len(library._codebooks)}" if library._codebooks else ""))
 
 for kind, text in ss.flash:
     getattr(st, kind)(text)
@@ -321,6 +346,8 @@ ss.flash = []
 
 def page_source():
     st.header("1. Källa – var kommer schemat ifrån?")
+    st.caption("Kom igång: läs in schemat här, titta på det i **2. Diagram** och klicka på **Generera** i steg 4. Teamets domänbibliotek "
+               "används automatiskt – du behöver inte ställa in något mer.")
     st.write("Läs in tabeller från en databas eller ett DDL-skript, eller bygg dem själv. Källorna kan kombineras, "
              "och om du läser in samma tabell igen behålls dina egna inställningar.")
     tab_db, tab_ddl, tab_manual = st.tabs(["SQL Server", "DDL-skript", "Skapa själv"])
@@ -483,11 +510,11 @@ def generator_settings(t: Table, col: Column):
     labels = GEN_LABELS
     cur_label = label_of(col.generator) if col.generator in REGISTRY else labels[0]
     if col.generator.startswith(library.PREFIX) and col.generator not in REGISTRY:
-        st.warning(f"Generatorn '{col.generator}' finns inte längre. Välj en annan, eller läs in den under 6. Generatorer.")
+        st.warning(f"Generatorn '{col.generator}' finns inte längre. Välj en annan, eller läs in den i domänbiblioteket.")
     elif col.generator.startswith(library.PREFIX) and library.origin(col.generator):
-        st.info("Den egna generatorn finns inte i ditt bibliotek, men projektet har en kopia av den. Lägg till den under 6. Generatorer.")
+        st.info("Den egna generatorn finns inte i ditt domänbibliotek, men projektet har en kopia av den. Lägg till den under Domänbibliotek → Egna generatorer.")
     picked = st.selectbox("Generator", labels, index=labels.index(cur_label), key=f"gen_{t.key}_{col.name}_{ss.ver}",
-                          help="Skriv i rutan för att söka, t.ex. 'datum', 'konto' eller 'diagnos'. Saknas något? Bygg en egen generator under 6. Generatorer.")
+                          help="Skriv i rutan för att söka, t.ex. 'datum', 'konto' eller 'diagnos'. Saknas något? Bygg en egen generator under Domänbibliotek → Egna generatorer.")
     if LABEL_TO_KEY[picked] != col.generator:
         set_generator(t, col, LABEL_TO_KEY[picked])
         changed()
@@ -792,7 +819,6 @@ def diagram_dot() -> str:
 
 
 def page_tables():
-    st.header("3. Tabeller och relationer")
     # --- ta emot redigeringar innan tabellerna ritas om
     dirty = False
     for idx, change in take_edits("tables").items():
@@ -841,7 +867,7 @@ def page_tables():
             "Kategori": st.column_config.SelectboxColumn(options=CAT_LABELS, required=True, width="medium"),
             "Rader": st.column_config.NumberColumn(min_value=0, step=1, help="Antal rader som ska genereras (antal unika om tabellen har historik)."),
             "Blir ungefär": st.column_config.NumberColumn(help="Faktiskt radantal när 'barn per förälder' eller historik (SCD2) styr."),
-            "Osäkra kolumner": st.column_config.NumberColumn(help="Kolumner där den automatiska tolkningen är en gissning – titta på dem under steg 4."),
+            "Osäkra kolumner": st.column_config.NumberColumn(help="Kolumner där den automatiska tolkningen är en gissning – titta på dem under fliken Kolumner."),
         })
         order, broken = load_order(project, [t.key for t in project.tables if t.include])
         st.caption("Laddordning (föräldrar före barn): " + " → ".join(order))
@@ -876,7 +902,7 @@ def page_tables():
                     infer_table(t, project, set_rows=True)
                     select("cur_table", t.key)
                     changed()
-                    flash("success", f"Tabellen {t.key} är skapad. Lägg till kolumner under steg 4.")
+                    flash("success", f"Tabellen {t.key} är skapad. Lägg till kolumner i diagrammet eller under fliken Kolumner.")
                     st.rerun()
     with b.expander("🗑️ Ta bort tabell"):
         if project.tables:
@@ -1001,7 +1027,7 @@ def param_widgets(t: Table, col: Column) -> dict:
             opts = list(project.value_lists) or [""]
             out[p.name] = st.selectbox(p.label, opts, index=opts.index(v) if v in opts else 0, key=k, help=h)
             if not project.value_lists:
-                st.caption("Inga värdelistor inlästa ännu – gör det under steg 5.")
+                st.caption("Inga värdelistor inlästa ännu – gör det under 3. Finjustera → Värdelistor.")
         else:
             out[p.name] = st.text_input(p.label, str(v), key=k, help=h)
     return out
@@ -1037,9 +1063,8 @@ def history_form(t: Table):
 
 
 def page_columns():
-    st.header("4. Kolumner – vad ska varje kolumn innehålla?")
     if not project.tables:
-        st.info("Inga tabeller ännu. Börja med steg 1 eller skapa en tabell under steg 3.")
+        st.info("Inga tabeller ännu. Börja med steg 1 eller skapa en tabell i diagrammet.")
         return
     keys = [t.key for t in project.tables]
     t = project.table(pick("Tabell", keys, "cur_table"))
@@ -1087,7 +1112,7 @@ def page_columns():
             fk = t.fk_for(col.name)
             if fk and project.table(fk.ref_table) is not None:
                 st.info(f"Kolumnen är en främmande nyckel och får värden från **{fk.ref_table}** ({', '.join(fk.ref_columns)}). "
-                        "Fördelning och andel NULL ställer du in under steg 3 → Relationer.")
+                        "Fördelning och andel NULL ställer du in i diagrammet (klicka på pilen) eller under fliken Tabeller och relationer.")
             else:
                 generator_settings(t, col)
     with right:
@@ -1221,19 +1246,7 @@ def tab_value_lists():
                 st.rerun()
         else:
             st.caption("Lägg till tabeller först.")
-    with b.expander("Testpersonnummer", expanded=bool(project.test_pnr_list)):
-        st.caption("Välj en lista med officiella testpersonnummer (t.ex. Skatteverkets, nedladdade som fil). Då används bara de numren, "
-                   "och födelsedatum och kön på raden följer numret. Inget nummer kan då sammanfalla med en verklig person. "
-                   "Räcker listan inte till alla rader stannar genereringen vid listans längd för tabeller där personnumret är unikt.")
-        opts = ["(ingen – generera påhittade nummer)"] + list(project.value_lists)
-        cur = project.test_pnr_list if project.test_pnr_list in project.value_lists else opts[0]
-        pickd = st.selectbox("Lista med testpersonnummer", opts, index=opts.index(cur), key=f"pnr_list_{ss.ver}")
-        new = "" if pickd == opts[0] else pickd
-        if new != project.test_pnr_list:
-            project.test_pnr_list = new
-            changed()
-            st.rerun()
-    with st.expander("Ta bort listor"):
+    with b.expander("Ta bort listor"):
         victims = st.multiselect("Listor", list(project.value_lists), key=f"del_lists_{ss.ver}")
         if victims and st.button("Ta bort valda"):
             for v in victims:
@@ -1246,11 +1259,20 @@ def tab_value_lists():
 
 def tab_codebooks():
     st.write("De inbyggda vårdkoderna är ett litet urval. Här läser du in hela kodverk från filer som ni har laddat ner, t.ex. "
-             "Socialstyrelsens ICD-10-SE och KVÅ. De inbyggda vanliga koderna förblir vanliga i datan, medan resten av kodverket "
-             "förekommer mer sällan. Kodtabeller får hela kodverket, en kod per rad.")
-    rows = [{"Kodverk": label, "Inbyggda exempel": len(builtin), "Inlästa koder": len(project.codebooks.get(kind) or [])}
+             "Socialstyrelsens ICD-10-SE och KVÅ. Kodverken gäller alla projekt. De inbyggda vanliga koderna förblir vanliga i datan, "
+             "medan resten av kodverket förekommer mer sällan. Kodtabeller får hela kodverket, en kod per rad.")
+    rows = [{"Kodverk": label, "Inbyggda exempel": len(builtin), "Inlästa koder": len(library.codebook(kind) or [])}
             for label, (kind, builtin) in CODEBOOKS.items()]
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    legacy = [k for k, v in (project.codebooks or {}).items() if v]
+    if legacy:
+        st.info("Det öppna projektet har egna kodverk från en tidigare version (de används före domänbibliotekets).")
+        if st.button("Flytta projektets kodverk till domänbiblioteket"):
+            for k in legacy:
+                library.save_codebook(k, project.codebooks[k])
+            project.codebooks = {}
+            changed()
+            st.rerun()
     label = st.selectbox("Kodverk att läsa in", list(CODEBOOKS), key="cb_kind")
     kind = CODEBOOKS[label][0]
     f = st.file_uploader("Fil (Excel, CSV eller tabbseparerad text)", type=["xlsx", "csv", "tsv", "txt"], key=f"cb_file_{ss.ver}")
@@ -1272,21 +1294,51 @@ def tab_codebooks():
             text_col = b.selectbox("Kolumn med text", cols, index=min(1, len(cols) - 1), key="cb_text")
             if st.button("Läs in kodverket", type="primary"):
                 pairs = [[str(c).strip(), "" if pd.isna(t) else str(t).strip()] for c, t in zip(df[code_col], df[text_col]) if not pd.isna(c) and str(c).strip()]
-                project.codebooks[kind] = pairs
+                library.save_codebook(kind, pairs)
                 for t in project.tables:  # kodtabeller ska rymma hela kodverket
                     if t.category == "reference" and any(c.generator.startswith("care.") for c in t.columns):
                         t.rows = default_rows(t, project)
                 changed()
                 flash("success", f"{len(pairs)} koder inlästa för {label}.")
                 st.rerun()
-    if project.codebooks.get(kind) and st.button(f"Ta bort inläst kodverk för {label}"):
-        project.codebooks.pop(kind, None)
+    if library.codebook(kind) and st.button(f"Ta bort inläst kodverk för {label}"):
+        library.delete_codebook(kind)
+        changed()
+        st.rerun()
+
+
+def tab_test_pnr():
+    st.write("Läs in en lista med officiella testpersonnummer, t.ex. Skatteverkets (nedladdad som fil). Då används bara de numren i alla "
+             "projekt, och födelsedatum och kön på raden följer numret, så inget nummer kan sammanfalla med en verklig person.")
+    st.caption("Räcker listan inte till alla rader stannar genereringen vid listans längd för tabeller där personnumret är unikt.")
+    current = library.test_pnr()
+    st.metric("Inlästa testpersonnummer", len(current))
+    f = st.file_uploader("Fil med ett personnummer per rad (text eller CSV – första kolumnen används)", type=["txt", "csv", "tsv", "xlsx"],
+                         key=f"pnr_file_{ss.ver}")
+    if f is not None and st.button("Läs in testpersonnumren", type="primary"):
+        try:
+            if f.name.lower().endswith(".xlsx"):
+                values = [str(v) for v in pd.read_excel(f, dtype=str, header=None).iloc[:, 0].dropna()]
+            else:
+                values = [ln.split(";")[0].split(",")[0].split("\t")[0] for ln in valuelists.decode(f.getvalue()).splitlines()]
+            valid = [v.strip() for v in values if learn.is_pnr(v.strip())]
+            if not valid:
+                st.error("Hittade inga giltiga personnummer i filen (10 eller 12 siffror med korrekt kontrollsiffra).")
+            else:
+                library.save_test_pnr(valid)
+                changed()
+                flash("success", f"{len(valid)} testpersonnummer inlästa" + (f" ({len(values) - len(valid)} rader hoppades över)" if len(values) > len(valid) else "") + ".")
+                st.rerun()
+        except Exception as e:
+            st.error(f"Kunde inte läsa filen: {e}")
+    if current and st.button("Ta bort testpersonnumren (generera påhittade nummer igen)"):
+        library.delete_test_pnr()
         changed()
         st.rerun()
 
 
 def tab_profile():
-    st.info("Har du själv åtkomst till produktionen? Använd **6. Generatorer → Lär från produktion** i stället: den analyserar direkt, "
+    st.info("Har du själv åtkomst till produktionen? Använd fliken **Direkt mot produktionen** i stället: den analyserar direkt, "
             "spärrar personuppgifter och skapar generatorer. Skriptet här är till för när någon annan behöver köra analysen åt dig.")
     st.write("Få datan att likna produktion utan att någon rad lämnar den. Skriptet nedan returnerar **bara aggregat**: radantal, "
              "andel NULL, lägsta/högsta/medel för tal, första/sista datum och värdefördelning för kolumner med få unika värden. "
@@ -1322,7 +1374,8 @@ def tab_profile():
 
 def tab_rules():
     st.write("Egna regler säger hur kolumner med ett visst namn alltid ska genereras, och gäller i alla projekt. De prövas före de "
-             "inbyggda tolkningsreglerna när ett schema läses in. Nya regler skapar du under steg 4 → 'Spara kolumnens inställning som regel'.")
+             "inbyggda tolkningsreglerna när ett schema läses in. Nya regler skapar du när du sparar en egen generator, eller under "
+             "Skapa testdata → 3. Finjustera → Kolumner → 'Spara kolumnens inställning som regel'.")
     st.caption(f"Reglerna sparas i `{rules.rules_path()}`. Filen kan delas i teamet; peka ut en gemensam fil med miljövariabeln DUMMYFILLER_RULES.")
     rs = rules.load_rules()
     if not rs:
@@ -1344,16 +1397,17 @@ def tab_rules():
         st.rerun()
 
 
-def page_lists():
-    st.header("5. Värdelistor – styr datan med egna exempel")
-    t1, t2, t3 = st.tabs(["Värdelistor", "Kodverk (vård)", "Profil från produktion"])
+def page_finetune():
+    st.header("3. Finjustera (valfritt)")
+    st.caption("Oftast behövs inget här – tabellerna och kolumnerna har redan fått förslag, och det mesta går att ändra direkt i diagrammet. "
+               "Här finns samma inställningar som tabeller, för den som vill ändra många på en gång.")
+    t1, t2, t3 = st.tabs(["Tabeller och relationer", "Kolumner", "Värdelistor"])
     with t1:
-        tab_value_lists()
+        page_tables()
     with t2:
-        tab_codebooks()
+        page_columns()
     with t3:
-        tab_profile()
-    st.caption("Egna generatorer, regionens egna koder och regler för kolumnnamn hanterar du under **6. Generatorer**.")
+        tab_value_lists()
 
 
 # ---------------------------------------------------------------- 6. Generatorer
@@ -1918,18 +1972,56 @@ def tab_learn():
                                        for e in log]), hide_index=True, width="stretch")
 
 
-def page_generators():
-    st.header("6. Generatorer – bygg och anpassa")
-    t1, t2, t3, t4, t5 = st.tabs(["Egna generatorer", "Lär från produktion", "Inbyggda listor", "Regler", "Dela med teamet"])
+def lib_generators():
+    st.header("Egna generatorer")
+    tab_custom_generators()
+
+
+def lib_lists():
+    st.header("Regionens listor och kodverk")
+    t1, t2, t3 = st.tabs(["Inbyggda listor", "Kodverk (vård)", "Testpersonnummer"])
     with t1:
-        tab_custom_generators()
-    with t2:
-        tab_learn()
-    with t3:
         tab_builtin_lists()
-    with t4:
-        tab_rules()
-    with t5:
+    with t2:
+        tab_codebooks()
+    with t3:
+        tab_test_pnr()
+
+
+def lib_rules():
+    st.header("Regler för kolumnnamn")
+    tab_rules()
+
+
+def lib_learn():
+    st.header("Lär från produktion")
+    t1, t2 = st.tabs(["Direkt mot produktionen", "Via skript (för den som saknar åtkomst)"])
+    with t1:
+        tab_learn()
+    with t2:
+        tab_profile()
+
+
+def lib_share():
+    st.header("Dela med teamet")
+    d = library.shared_dir()
+    st.write(f"Teamets domänbibliotek delas via mappen **`{d}`**. Den ignoreras av git, så filerna delas manuellt med kollegorna "
+             "tills vidare: kopiera filen till samma mapp i deras repo. Appen läser in nya och ändrade filer automatiskt nästa "
+             "gång den används, så utvecklarna behöver inte göra något.")
+    a, b = st.columns([1, 2])
+    if a.button("📤 Publicera mitt bibliotek till mappen", type="primary",
+                help="Skriver egna generatorer, regionens listor, kodverk, testpersonnummer och regler till en fil i mappen."):
+        path = library.publish()
+        flash("success", f"Publicerat till {path}. Dela filen med kollegorna.")
+        st.rerun()
+    files = library.shared_files()
+    if files:
+        st.dataframe(pd.DataFrame([{"Fil": f["name"], "Ändrad": f["modified"].strftime("%Y-%m-%d %H:%M"),
+                                    "Inläst": "✔" if f["imported"] else "nej"} for f in files]), hide_index=True, width="stretch")
+        b.caption("Har samma generator eller lista ändrats både här och i en fil från teamet gäller den senast inlästa versionen.")
+    else:
+        st.caption("Mappen är tom ännu.")
+    with st.expander("Exportera eller läs in en fil på annat sätt"):
         tab_share()
 
 
@@ -1940,7 +2032,7 @@ MODES = ["Ny datamängd", "Lägg till ny data ovanpå befintlig (inkrementellt)"
 
 
 def page_generate():
-    st.header("7. Generera och skriv ut")
+    st.header("4. Generera och skriv ut")
     included = [t for t in project.tables if t.include]
     if not included:
         st.info("Det finns inga tabeller att generera.")
@@ -2105,8 +2197,11 @@ def page_generate():
             st.success(f"Skriptet är skrivet till {out.resolve()}")
 
 
-{PAGES[0]: page_source, PAGES[1]: page_diagram, PAGES[2]: page_tables, PAGES[3]: page_columns, PAGES[4]: page_lists,
- PAGES[5]: page_generators, PAGES[6]: page_generate}[page]()
+if section == SECTIONS[0]:
+    {PAGES[0]: page_source, PAGES[1]: page_diagram, PAGES[2]: page_finetune, PAGES[3]: page_generate}[page]()
+else:
+    {LIB_PAGES[0]: lib_generators, LIB_PAGES[1]: lib_lists, LIB_PAGES[2]: lib_rules, LIB_PAGES[3]: lib_learn,
+     LIB_PAGES[4]: lib_share}[page]()
 
 # automatisk sparning: körs efter varje ändring (en körning som avbryts av st.rerun sparas av körningen som följer)
 ss.project.connection = dict(ss.conn)  # utan lösenord – det ligger bara i sessionen

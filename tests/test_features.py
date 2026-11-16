@@ -250,6 +250,41 @@ def test_care_pathways_and_correlations():
     assert share("E11.9", "Metformin") > 0.25 > share("J06.9", "Metformin")
 
 
+def test_patient_level_chronic_conditions():
+    """Steg C: kroniska sjukdomar hör till patienten och följer med i alla patientens kontakter, läkemedel och provsvar."""
+    from statistics import mean
+
+    from dummyfiller import care
+    p = care_project()
+    assert p.table("dbo.Vardkontakt").fk_for("PatientID").distribution == "need"
+    res = generate(p)
+    pat = res.data["dbo.Patient"]
+    prof = {pid: care.patient_profile(p.seed, pat, i) for i, pid in enumerate(pat.column_values("PatientID"))}
+    vk = {r["VardkontaktID"]: r for r in rows_of(res, "dbo.Vardkontakt")}
+    for r in rows_of(res, "dbo.VardkontaktDiagnos"):  # ingen får en kronisk diagnos som hen inte har
+        if r["DiagnosKod"] in care.CHRONIC:
+            assert r["DiagnosKod"] in prof[vk[r["VardkontaktID"]]["PatientID"]]["chronic"]
+    per = Counter(r["PatientID"] for r in vk.values())
+    chronic = [per[k] for k, v in prof.items() if v["chronic"]]
+    other = [per[k] for k, v in prof.items() if not v["chronic"]]
+    assert mean(chronic) > 1.5 * mean(other)  # kroniker kommer oftare
+    first = {}
+    for r in sorted(vk.values(), key=lambda r: r["Inskrivningsdatum"]):
+        first.setdefault(r["PatientID"], r["Besokstyp"])
+    assert set(first.values()) == {"Nybesök"}
+    labs = rows_of(res, "dbo.Labbsvar")
+    assert all(r["PatientID"] == vk[r["VardkontaktID"]]["PatientID"] for r in labs if r["VardkontaktID"] is not None)  # samma patient
+    diab = [float(r["Resultat"]) for r in labs if r["Analysnamn"] == "B-HbA1c" and "E11.9" in prof[r["PatientID"]]["chronic"]]
+    rest = [float(r["Resultat"]) for r in labs if r["Analysnamn"] == "B-HbA1c" and not {"E11.9", "E10.9"} & set(prof[r["PatientID"]]["chronic"])]
+    assert diab and rest and mean(diab) > mean(rest) + 8
+    for pid, v in prof.items():  # patientens stående läkemedel har samma styrka varje gång
+        for code, (d, strength) in v["drugs"].items():
+            got = {r["Styrka"] for r in rows_of(res, "dbo.Lakemedelsordination") if vk[r["VardkontaktID"]]["PatientID"] == pid
+                   and r["ATCKod"] == d[0] and r["Styrka"] != strength}
+            assert not got or len(got) < 3
+        break
+
+
 def test_codebook_and_test_pnr():
     p = care_project()
     p.codebooks["diagnosis"] = [[f"X{n:02d}.{n % 10}", f"Extra diagnos {n}"] for n in range(60)] + [["I109", "Dubblett av inbyggd"]]

@@ -516,6 +516,12 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
         if sub("flagga", "avvik", "abnormal", "flag"):
             return "care.lab_flag", {}, HIGH
     if k == "string":
+        patient_fk = project is not None and any((pt := project.table(fk.ref_table)) is not None and pt.category == "person"
+                                                 and pt.key != table.key for fk in table.foreign_keys)
+        if patient_fk and sub("kontakttyp", "encountertype"):  # följer kontaktens orsak och patientens sjukdomar
+            return "care.contact_type", {}, HIGH
+        if patient_fk and sub("besokstyp", "visittype"):
+            return "care.visit_type", {}, HIGH
         for words, name in ((("kontakttyp", "encountertype"), "care_contact_type"), (("besokstyp", "visittype"), "care_visit_type"),
                             (("yrkesroll", "profession", "vardgivarkategori"), "care_profession"),
                             (("triage",), "care_triage"), (("remisstatus", "remissstatus"), "care_referral_status"),
@@ -808,6 +814,8 @@ def default_fk_settings(table: Table, project: Project | None) -> None:
         if parent.category == "transaction" and not driver and fk.per_parent_max == 0:
             fk.per_parent_min, fk.per_parent_max = (1, 5) if lines else (1, 3) if treat else (0, 3)
             driver = True
+        elif parent.category == "person" and fk.distribution == "random" and any(c.generator == "person.birthdate" for c in parent.columns):
+            fk.distribution = "need"  # patienter: äldre och kroniker får fler kontakter
         elif parent.category in ("person", "company") and fk.distribution == "random":
             fk.distribution = "skewed"  # några patienter/leverantörer står för många av händelserna
 

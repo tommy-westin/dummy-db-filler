@@ -18,17 +18,35 @@ Verktyget är anpassat för Region Jämtland Härjedalen: personer och enheter h
 vårdenheter heter hälsocentraler och Östersunds sjukhus, och de inbyggda områdena är vård, ekonomi, personal
 och tandvård.
 
-## Arbetsgång
+## Två avsnitt
+
+Appen har två avsnitt som väljs överst i sidomenyn. Alla kommer åt båda.
+
+### 🧪 Skapa testdata – för utvecklarna
 
 | Steg | Vad du gör |
 |---|---|
 | 1. Källa | Läs in schema från SQL Server (endast metadata), från DDL-skript, eller hoppa över och bygg själv. |
 | 2. Diagram | Se och redigera allt i ett tabelldiagram: flytta tabeller, dra pilar mellan kolumner för att skapa relationer, godta föreslagna relationer och ändra tabeller och kolumner i sidopanelen. |
-| 3. Tabeller och relationer | Kategorisera tabeller, ange antal rader eller barn per förälder, skapa egna tabeller, lägg till eller föreslå relationer, se relationsdiagrammet. |
-| 4. Kolumner | Granska förslaget per kolumn, byt generator, finjustera parametrar och se en förhandsgranskning direkt. Ställ in historik (SCD2) och spara egna regler. |
-| 5. Värdelistor | Läs in exempelfiler, hela kodverk, testpersonnummer och profil från produktion. |
-| 6. Generatorer | Bygg egna generatorer (uppslagstabeller och förinställningar), ersätt de inbyggda listorna med regionens riktiga koder, hantera regler och dela biblioteket med teamet. |
-| 7. Generera | Välj scenario, ny eller inkrementell körning och eventuell smutsig data. Granska datan och kvalitetsrapporten och skriv till databas, CSV, Parquet eller SQL-skript. |
+| 3. Finjustera (valfritt) | Samma inställningar som tabeller, för att ändra många på en gång: tabeller och relationer, kolumner (inklusive historik och regler) och projektets egna värdelistor. |
+| 4. Generera | Välj scenario, ny eller inkrementell körning och eventuell smutsig data. Granska datan och kvalitetsrapporten och skriv till databas, CSV, Parquet eller SQL-skript. |
+
+Oftast räcker steg 1, 2 och 4. Teamets domänbibliotek används automatiskt.
+
+### 📚 Domänbibliotek – byggs upp en gång och delas
+
+| Sida | Innehåll |
+|---|---|
+| Egna generatorer | Uppslagstabeller och förinställningar, t.ex. regionens ansvarskoder. |
+| Regionens listor och kodverk | Ersätt de inbyggda listorna med regionens riktiga koder; hela kodverk (ICD-10-SE, KVÅ, ATC) och testpersonnummer. |
+| Regler för kolumnnamn | "Kolumner som heter `*ansvar*` ska använda JH: Ansvar". |
+| Lär från produktion | Direkt mot produktionen (med matchning och spärrar), eller via skript för den som saknar åtkomst. |
+| Dela med teamet | Publicera till den gemensamma mappen, eller exportera och läs in filer. |
+
+Biblioteket gäller alla projekt. **Delning:** mappen `bibliotek/` i repot ignoreras av git. **📤 Publicera** skriver
+hela biblioteket till `bibliotek/teamets_bibliotek.yaml`; dela filen med kollegorna genom att lägga den i samma mapp i
+deras repo. Appen läser in nya och ändrade filer i mappen automatiskt nästa gång den används, och teamets version
+ersätter det som har samma namn. Mappen kan flyttas med miljövariabeln `DUMMYFILLER_SHARED`.
 
 Allt du gör sparas automatiskt i en lokal SQLite-databas, `data/dummyfiller.db` i repot, så att arbetet finns
 kvar när sidan laddas om eller appen startas om. I sidopanelen byter du projekt, skapar nya eller kopierar ett
@@ -80,14 +98,14 @@ Diagrammet är en liten HTML/JavaScript-komponent (`dummyfiller/diagram/index.ht
 - **Barn per förälder.** Ange t.ex. 1–5 på en relation, så följer tabellens radantal av föräldern (fakturarader per
   faktura, diagnoser per vårdkontakt). Detaljtabeller får detta som utgångsvärde.
 - **Scenarier.** `liten`, `mellan` och `stor` multiplicerar radantalen (inte kodtabeller och kalendrar). Egna
-  scenarier läggs till under steg 7.
+  scenarier läggs till under steg 4.
 - **Styrda relationer.** När en kodkolumn pekar på en kodtabell väljs föräldern utifrån kolumnens generator, så
   att t.ex. diagnosen passar patienten.
 
 ### Data warehouse
 
 - **Historik (SCD2).** Tabeller med giltig från/till får flera versioner per affärsnyckel med giltighetstider som
-  inte överlappar, och en flagga för aktuell version. Känns igen automatiskt och ställs in under steg 4.
+  inte överlappar, och en flagga för aktuell version. Känns igen automatiskt och ställs in i diagrammet eller under 3. Finjustera → Kolumner.
 - **Inkrementella körningar.** Lägg nya rader ovanpå befintlig data: löpnummer fortsätter efter de befintliga,
   datum hamnar från och med valt datum, och nya rader pekar på föräldrar som redan finns i databasen.
 - **Smutsig data.** Blanksteg, blandade versaler, tomma strängar, formatvariationer, dubbletter och föräldralösa
@@ -118,7 +136,7 @@ Diagrammet är en liten HTML/JavaScript-komponent (`dummyfiller/diagram/index.ht
 | Tal | Intervall med jämn, normal eller skev fördelning. |
 | Valfri Faker-metod | Allt som biblioteket Faker kan generera. |
 
-### Lär från produktion (steg 6)
+### Lär från produktion (domänbiblioteket)
 
 För den som har behörighet till produktionsdata: analysen läser ett slumpvist urval per tabell till minnet och tar
 fram generatorer som återger produktionens fördelningar – utan att några personuppgifter följer med.
@@ -153,7 +171,7 @@ produktionens kolumnnamn.
 Resultatet blir generatorer i biblioteket (`Lärd: Tabell.Kolumn`) som kan delas med utvecklarna. Verktyget minskar
 risken men ersätter inte er egen bedömning – stäm gärna av upplägget med dataskyddsombudet.
 
-### Egna generatorer och regionens egna koder (steg 6)
+### Egna generatorer och regionens egna koder (domänbiblioteket)
 
 - **Uppslagstabell:** klistra in eller läs in en tabell, t.ex. regionens ansvarskoder med benämning och förvaltning.
   En kolumn som använder generatorn väljer ett fält; kolumner på samma rad hämtar från samma tabellrad, och en
@@ -177,13 +195,26 @@ beredningsform), labbanalyser med enhet, referensintervall och avvikelseflagga, 
 sjukhus, region och HSA-id, samt värdelistor för kontakttyp, besökstyp, vårdform, yrkeskategori, triage,
 remisstatus med flera.
 
-Sambanden är inbyggda: varje vårdkontakt får en huvudorsak som passar patientens ålder och kön, och diagnoser,
-läkemedel och provsvar som hör till kontakten följer den (diabetes ger oftare metformin och förhöjt HbA1c).
-Första diagnosen per kontakt är huvuddiagnos, vårdtiden beror på kontakttypen och en patients kontakter
-ligger i tidsordning.
+Sjukdomarna hör till patienten, inte bara till kontakten:
+
+- **Kroniska sjukdomar per patient** (hypertoni, diabetes, astma, KOL, förmaksflimmer, hjärtsvikt, depression m.fl.)
+  efter ålder och kön. Samma patient har samma sjukdomar i alla tabeller, och ingen får en kronisk diagnos hen saknar.
+- **Kroniker söker oftare vård:** relationen till patienten fördelas *efter vårdbehov*, så äldre och kroniker får fler
+  kontakter. De flesta av deras kontakter handlar om de kroniska sjukdomarna; akuta tillstånd tillkommer ovanpå.
+- **Stående läkemedel:** samma preparat och styrka för samma sjukdom år efter år. Bidiagnoser är oftast patientens
+  andra sjukdomar.
+- **Provsvar på patientnivå:** varje patient har en egen nivå per analys. Kroniker har avvikande värden som närmar sig
+  det normala med tiden (t.ex. HbA1c hos diabetiker), och kontrollproverna följer sjukdomarna.
+- **Besökstyp och kontakttyp:** första kontakten är ett nybesök, uppföljning av kroniska sjukdomar oftast återbesök;
+  hjärtsvikt, höftfraktur och lunginflammation leder oftare till inläggning.
+- **En rad pekar aldrig på två patienter:** pekar t.ex. ett provsvar på både en patient och en vårdkontakt tas patienten
+  från vårdkontakten.
+
+Förekomsten är grova uppskattningar, inte officiell statistik. Första diagnosen per kontakt är huvuddiagnos, vårdtiden
+beror på kontakttypen och en patients kontakter ligger i tidsordning.
 
 Kodlistorna är ett litet urval exempelkoder i rätt format, inte kompletta kodverk. Hela kodverk (t.ex.
-Socialstyrelsens ICD-10-SE och KVÅ som Excel eller text) läses in under **5. Värdelistor → Kodverk**. De vanliga
+Socialstyrelsens ICD-10-SE och KVÅ som Excel eller text) läses in under **Domänbibliotek → Regionens listor och kodverk → Kodverk** och gäller alla projekt. De vanliga
 koderna förblir vanliga och resten förekommer mer sällan. I tabeller med kategorin *Referens / kodtabell* delas
 koderna ut i ordning, en per rad.
 
@@ -199,8 +230,8 @@ Kontoplanen, ansvarskoderna, befattningarna, lönenivåerna och tandvårdspriser
 regionens riktiga kodplan eller gällande prislistor. De riktiga koderna läser ni in som värdelistor (CSV med kod
 och benämning hålls ihop radvis), eller hämtar via profil från produktion.
 
-**Testpersonnummer:** läs in Skatteverkets testpersonnummer som värdelista och välj den under
-**5. Värdelistor → Testpersonnummer**. Då används bara de numren, och födelsedatum och kön följer numret.
+**Testpersonnummer:** läs in Skatteverkets testpersonnummer under **Domänbibliotek → Regionens listor och kodverk →
+Testpersonnummer**. Då används bara de numren i alla projekt, och födelsedatum och kön följer numret.
 
 ## Kommandorad
 

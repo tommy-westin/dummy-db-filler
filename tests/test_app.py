@@ -9,7 +9,17 @@ from dummyfiller.model import Project
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = str(ROOT / "dummyfiller" / "app.py")
-PAGES = ["1. Källa", "2. Diagram", "3. Tabeller och relationer", "4. Kolumner", "5. Värdelistor", "6. Generatorer", "7. Generera"]
+PAGES = ["1. Källa", "2. Diagram", "3. Finjustera (valfritt)", "4. Generera"]
+LIB_PAGES = ["Egna generatorer", "Regionens listor och kodverk", "Regler för kolumnnamn", "Lär från produktion", "Dela med teamet"]
+SECTIONS = ["🧪 Skapa testdata", "📚 Domänbibliotek"]
+
+
+def goto(at, page):
+    """Välj sida i rätt avsnitt (Skapa testdata eller Domänbibliotek)."""
+    if page in PAGES:
+        at.session_state["section"], at.session_state["page"] = SECTIONS[0], page
+    else:
+        at.session_state["section"], at.session_state["lib_page"] = SECTIONS[1], page
 
 
 def _project() -> Project:
@@ -23,10 +33,10 @@ def _project() -> Project:
 
 def test_pages_render_empty_and_loaded():
     for project in (Project(), _project()):
-        for page in PAGES:
+        for page in PAGES + LIB_PAGES:
             at = AppTest.from_file(APP, default_timeout=60)
             at.session_state["project"] = project
-            at.session_state["page"] = page
+            goto(at, page)
             at.run()
             assert not at.exception, f"{page}: {at.exception}"
 
@@ -34,7 +44,7 @@ def test_pages_render_empty_and_loaded():
 def test_generate_flow():
     at = AppTest.from_file(APP, default_timeout=60)
     at.session_state["project"] = _project()
-    at.session_state["page"] = PAGES[6]
+    goto(at, PAGES[3])
     at.run()
     next(b for b in at.button if b.label.startswith("Generera")).click().run()
     assert not at.exception
@@ -48,7 +58,7 @@ def test_load_example_and_change_generator():
     next(b for b in at.button if b.label.startswith("Läs in exempelschema")).click().run()
     assert not at.exception
     assert len(at.session_state["project"].tables) == 9
-    at.session_state["page"] = PAGES[3]
+    goto(at, PAGES[2])
     at.session_state["cur_table"] = "dbo.Patient"
     at.session_state["cur_col"] = "Telefon"
     at.run()
@@ -68,7 +78,7 @@ def test_new_features_in_ui():
     project.dirty = {"tables": ["dbo.Leverantor"], "pct": 10, "kinds": ["whitespace", "duplicates"]}
     at = AppTest.from_file(APP, default_timeout=60)
     at.session_state["project"] = project
-    at.session_state["page"] = PAGES[3]
+    goto(at, PAGES[2])
     at.session_state["cur_table"] = "dbo.DimLeverantor"
     at.session_state["cur_col"] = "Telefon"
     at.run()
@@ -77,12 +87,12 @@ def test_new_features_in_ui():
     next(b for b in at.button if b.label == "Spara regel").click().run()
     assert not at.exception and rules.load_rules()[0]["pattern"] == "telefon"
 
-    at.session_state["page"] = PAGES[4]
+    goto(at, LIB_PAGES[3])  # skriptet för profil från produktion ligger i domänbiblioteket
     at.run()
     assert not at.exception
     assert any("COUNT_BIG" in c.value for c in at.code)  # profilskriptet visas
 
-    at.session_state["page"] = PAGES[6]
+    goto(at, PAGES[3])
     at.run()
     next(s for s in at.selectbox if s.label.startswith("Scenario")).select("liten").run()
     next(b for b in at.button if b.label.startswith("Generera")).click().run()
@@ -97,7 +107,7 @@ def test_diagram_panels_and_events():
     project = _project()
     at = AppTest.from_file(APP, default_timeout=60)
     at.session_state["project"] = project
-    at.session_state["page"] = PAGES[1]
+    goto(at, PAGES[1])
     at.run()
     assert not at.exception
     assert all(len(t.pos) == 2 for t in project.tables)  # automatisk placering
@@ -170,7 +180,7 @@ def test_autosave_survives_reload():
     from dummyfiller import store
 
     at = AppTest.from_file(APP, default_timeout=60)
-    at.session_state["page"] = PAGES[1]
+    goto(at, PAGES[1])
     at.run()
     assert not at.exception
     next(x for x in at.text_input if x.label == "Tabellnamn").input("Remiss")
@@ -200,7 +210,7 @@ def test_generators_page():
     project = _project()
     at = AppTest.from_file(APP, default_timeout=60)
     at.session_state["project"] = project
-    at.session_state["page"] = PAGES[5]
+    goto(at, LIB_PAGES[0])
     at.run()
     assert not at.exception
 
@@ -218,7 +228,7 @@ def test_generators_page():
     from dummyfiller import rules
     assert rules.load_rules()[0]["generator"] == "egen.jh_ansvar"
 
-    at.session_state["page"] = PAGES[3]  # generatorn finns i listan på kolumnsidan
+    goto(at, PAGES[2])  # generatorn finns i listan på kolumnsidan
     at.session_state["cur_table"] = "dbo.Patient"
     at.session_state["cur_col"] = "Ort"
     at.run()
@@ -227,7 +237,7 @@ def test_generators_page():
     assert project.table("dbo.Patient").column("Ort").generator == "egen.jh_ansvar"
     assert "egen.jh_ansvar" in at.session_state["project"].custom_generators  # projektet har en kopia
 
-    at.session_state["page"] = PAGES[5]
+    goto(at, LIB_PAGES[0])
     at.session_state["lib_cur"] = "__ny__"
     at.session_state["pickver_lib_cur"] = 99
     at.run()
@@ -238,6 +248,7 @@ def test_generators_page():
     next(b for b in at.button if b.label == "💾 Spara generatorn").click().run()
     assert not at.exception and library.custom_generators()["egen.jh_fakturanummer"]["params"]["template"] == "LF-{seq:06}"
 
+    goto(at, LIB_PAGES[1])
     at.run()
     assert not at.exception
     assert any(s.label == "Lista" for s in at.selectbox)  # fliken Inbyggda listor
@@ -247,3 +258,19 @@ def test_generators_page():
     next(s for s in at.selectbox if s.label == "Lista").select_index(2).run()  # Kontoplan, Ansvar, Verksamheter
     assert not at.exception
     assert any(b.label == "↩️ Återställ originalet" for b in at.button)
+
+
+def test_sections_and_publish():
+    """Utvecklarflödet har fyra steg; domänbiblioteket ligger i ett eget avsnitt med publicering till den gemensamma mappen."""
+    from dummyfiller import library
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.session_state["project"] = _project()
+    at.run()
+    assert not at.exception
+    steps = next(r for r in at.sidebar.radio if r.label == "Steg")
+    assert list(steps.options) == PAGES  # inga biblioteksfunktioner bland utvecklarnas steg
+    goto(at, LIB_PAGES[4])
+    at.run()
+    assert not at.exception and not any(r.label == "Steg" for r in at.sidebar.radio)
+    next(b for b in at.button if b.label == "📤 Publicera mitt bibliotek till mappen").click().run()
+    assert not at.exception and (library.shared_dir() / library.SHARED_FILE).exists()

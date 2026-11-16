@@ -23,6 +23,7 @@ DISTRIBUTIONS = {
     "skewed": "Skev (några föräldrar får många rader)",
     "even": "Jämnt fördelad (i tur och ordning)",
     "unique": "En-till-en (varje förälder högst en gång)",
+    "need": "Efter vårdbehov (äldre och kroniker oftare)",
 }
 
 _INT_RANGES = {

@@ -111,6 +111,35 @@ def test_project_copy_keeps_working_without_library(tmp_path, monkeypatch):
     assert "saknas" in library.origin("egen.jh_fakturanummer")
 
 
+def test_shared_folder_publish_and_sync(tmp_path, monkeypatch):
+    import os
+    library.save_generator(FAKNR)
+    library.save_codebook("diagnosis", [["X01.1", "Testdiagnos"]])
+    library.save_test_pnr(["19121212-1212"])
+    path = library.publish()
+    assert path.parent == library.shared_dir() and path.exists()
+    assert library.sync_shared() == []  # den egna publiceringen läses inte in igen
+
+    monkeypatch.setenv("DUMMYFILLER_DB", str(tmp_path / "kollega.db"))  # en kollega med tom databas och samma fil i mappen
+    library.refresh(force=True)
+    assert "egen.jh_fakturanummer" not in REGISTRY and library.codebook("diagnosis") is None
+    done = library.sync_shared()
+    assert done[0][0] == library.SHARED_FILE and done[0][1]["generatorer"] == 1 and done[0][1]["kodverk"] == 1
+    assert library.codebook("diagnosis") == [["X01.1", "Testdiagnos"]] and library.test_pnr() == ["19121212-1212"]
+    assert library.sync_shared() == []  # oförändrad fil läses inte in igen
+
+    p, t = project_with([Column.from_type("Fakturanr", "varchar(12)"), Column.from_type("Diagnoskod", "varchar(8)")])
+    use(t, "Fakturanr", "egen.jh_fakturanummer")
+    t.category = "reference"
+    use(t, "Diagnoskod", "care.diagnosis_code")
+    infer_table(t, p, set_rows=True)
+    assert "X01.1" in generate(p).data["dbo.Rad"].column_values("Diagnoskod")  # kodverket i biblioteket gäller alla projekt
+
+    path.write_text(path.read_text(encoding="utf-8").replace("JH-{seq:05}", "NY-{seq:05}"), encoding="utf-8")  # teamet uppdaterar
+    os.utime(path, None)
+    assert library.sync_shared() and generate(p).data["dbo.Rad"].column_values("Fakturanr")[0] == "NY-00001"
+
+
 def test_export_import_and_cli(tmp_path, monkeypatch, capsys):
     library.save_generator(ANSVAR)
     library.save_list("region.activities", [["100", "Primärvård", 1]])

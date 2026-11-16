@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import random
 import string
-from datetime import date
+from datetime import date, datetime
 
 from . import generators as _g
 from . import vocab
@@ -140,8 +140,42 @@ DIAG_LABS = {
     "C61.9": [("P-PSA", "H")], "I50.9": [("P-Kreatinin", "H"), ("P-Natrium", "L")], "A09.9": [("P-CRP", "H"), ("P-Kalium", "L")],
     "B34.9": [("P-CRP", None)],
 }
+# --- kroniska sjukdomar på patientnivå (steg C mot en förloppsmodell)
+# Förekomsten är grova uppskattningar för svensk vuxenbefolkning, inte officiell statistik – kalibrera gärna med
+# "Lär från produktion". prev: [(lägsta ålder, högsta ålder, procent)], sex: faktor per kön, need: hur mycket vård
+# sjukdomen ger upphov till, labs: analyser som följs och åt vilket håll sjukdomen drar dem.
+CHRONIC = {
+    "I10.9": {"prev": [(18, 44, 3), (45, 64, 20), (65, 79, 45), (80, 120, 55)], "need": 0.8, "labs": [("P-Kreatinin", None), ("P-Kalium", None)]},
+    "E11.9": {"prev": [(18, 44, 1), (45, 64, 6), (65, 79, 14), (80, 120, 15)], "sex": {"M": 1.3, "K": 0.8}, "need": 1.5,
+              "labs": [("B-HbA1c", "H"), ("P-Glukos", "H"), ("P-Kreatinin", None)]},
+    "E10.9": {"prev": [(5, 70, 0.5)], "need": 2.0, "labs": [("B-HbA1c", "H"), ("P-Glukos", "H")]},
+    "J45.9": {"prev": [(3, 17, 8), (18, 120, 6)], "need": 0.6, "labs": []},
+    "J44.9": {"prev": [(45, 64, 3), (65, 120, 8)], "need": 1.4, "labs": [("P-CRP", None)]},
+    "I48.9": {"prev": [(50, 64, 2), (65, 79, 8), (80, 120, 15)], "sex": {"M": 1.2, "K": 0.85}, "need": 1.2,
+              "labs": [("B-Hemoglobin", None), ("P-Kreatinin", None)]},
+    "I50.9": {"prev": [(55, 64, 1), (65, 79, 4), (80, 120, 12)], "need": 2.2, "labs": [("P-Kreatinin", "H"), ("P-Natrium", "L"), ("P-Kalium", None)]},
+    "E78.0": {"prev": [(40, 120, 10)], "need": 0.4, "labs": [("P-LDL-kolesterol", "H"), ("P-Kolesterol", "H")]},
+    "E03.9": {"prev": [(20, 120, 3)], "sex": {"K": 1.6, "M": 0.3}, "need": 0.4, "labs": [("P-TSH", "H")]},
+    "F32.9": {"prev": [(15, 64, 6), (65, 120, 4)], "sex": {"K": 1.3, "M": 0.7}, "need": 1.0, "labs": []},
+    "F41.9": {"prev": [(15, 64, 6), (65, 120, 3)], "sex": {"K": 1.3, "M": 0.7}, "need": 0.8, "labs": []},
+    "M17.9": {"prev": [(50, 64, 5), (65, 120, 12)], "need": 0.6, "labs": []},
+    "I25.9": {"prev": [(55, 64, 2), (65, 79, 7), (80, 120, 12)], "sex": {"M": 1.4, "K": 0.6}, "need": 1.0,
+              "labs": [("P-LDL-kolesterol", "H"), ("P-Kreatinin", None)]},
+    "D50.9": {"prev": [(15, 50, 3), (51, 120, 1)], "sex": {"K": 1.8, "M": 0.3}, "need": 0.5, "labs": [("B-Hemoglobin", "L")]},
+}
+INPATIENT = {"I50.9", "S72.0", "J18.9", "I21.9", "I63.9", "K35.8", "C34.9", "J44.9"}  # leder oftare till inläggning
 _FEMALE = {"k", "kvinna", "f", "female", "2"}
+_PROFILE_CACHE: dict = {}
 _CODE_CACHE: dict = {}
+
+
+def _book(project, kind: str):
+    """Projektets eget kodverk (äldre projekt), annars domänbibliotekets."""
+    own = (project.codebooks or {}).get(kind) if project is not None else None
+    if own:
+        return own
+    from . import library
+    return library.codebook(kind)
 
 
 def _norm_code(code) -> str:
@@ -150,7 +184,7 @@ def _norm_code(code) -> str:
 
 def _codes(ctx, kind: str, builtin: list) -> tuple[list, list]:
     """(koder, kumulativa vikter). Ett inläst kodverk läggs till de inbyggda exemplen; vanliga koder förblir vanliga."""
-    book = ctx.project.codebooks.get(kind)
+    book = _book(ctx.project, kind)
     key = (kind, id(book), len(book) if book else 0, _g.LIST_REVISION)
     hit = _CODE_CACHE.get(key)
     if hit is None:
@@ -175,7 +209,7 @@ def _codes(ctx, kind: str, builtin: list) -> tuple[list, list]:
 
 
 def codebook_size(project, kind: str, builtin: list) -> int:
-    book = project.codebooks.get(kind)
+    book = _book(project, kind)
     if not book:
         return len(builtin)
     known = {_norm_code(i[0]) for i in builtin}
@@ -206,46 +240,140 @@ def _person_info(data, row) -> tuple[int | None, bool | None]:
     return age, female
 
 
+def _prevalence(spec: dict, age, female) -> float:
+    a = 45 if age is None else age
+    pct = next((p for lo, hi, p in spec["prev"] if lo <= a <= hi), 0.0)
+    sex = spec.get("sex") or {}
+    if female is not None:
+        pct *= sex.get("K" if female else "M", 1.0)
+    return pct / 100
+
+
+def patient_profile(seed, data, idx: int) -> dict:
+    """Patientens kroniska sjukdomar, fasta läkemedel och egna nivåer för labbvärden.
+
+    Räknas fram ur patientraden och slumpfröet, så att samma patient får samma profil i alla tabeller.
+    """
+    key = (seed, data.table.key, idx, id(data), _g.LIST_REVISION)
+    hit = _PROFILE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    age, female = _person_info(data, data.rows[idx])
+    rng = random.Random(f"{seed}:patient:{data.table.key}:{idx}")
+    known = {d[0] for d in DIAGNOSES}
+    chronic = [code for code, spec in CHRONIC.items() if code in known and rng.random() < _prevalence(spec, age, female)]
+    drugs = {}
+    for code in chronic:  # samma preparat och styrka för sjukdomen år efter år
+        fitting = [x for x in DRUGS if x[0] in DIAG_DRUGS.get(code, [])]
+        if fitting:
+            d = rng.choice(fitting)
+            drugs[code] = (d, rng.choice(d[3]))
+    effects = {}
+    for code in chronic:
+        for name, direction in CHRONIC[code]["labs"]:
+            if direction:
+                effects[name] = direction
+    labs = {}
+    for name, unit, lo, hi, dec, _ in LABS:  # patientens egen nivå per analys
+        if effects.get(name) == "H":
+            base = hi * (rng.uniform(1.5, 4.0) if lo == 0 else rng.uniform(1.15, 1.6))
+        elif effects.get(name) == "L":
+            base = lo * rng.uniform(0.72, 0.93)
+        elif lo == 0:
+            base = hi * rng.betavariate(1.5, 4)
+        else:
+            base = rng.gauss((lo + hi) / 2, (hi - lo) / 7)
+        labs[name] = base
+    need = 1.0 + 0.015 * max(0, (age if age is not None else 45) - 40) + sum(CHRONIC[c]["need"] for c in chronic)
+    prof = {"age": age, "female": female, "chronic": chronic, "drugs": drugs, "labs": labs, "effects": effects, "need": need}
+    if len(_PROFILE_CACHE) > 300_000:
+        _PROFILE_CACHE.clear()
+    _PROFILE_CACHE[key] = prof
+    return prof
+
+
+def _care_need(seed, data, idx):
+    """Vikt för fördelningen 'efter vårdbehov': äldre och kroniker får fler vårdkontakter."""
+    if data.table.category != "person" or not any(c.generator in ("person.birthdate", "person.gender") for c in data.table.columns):
+        return None
+    return patient_profile(seed, data, idx)["need"]
+
+
+_g.PARENT_WEIGHTS.append(_care_need)
+
+
 def _episode(ctx):
-    """Vårdhändelsen som raden hör till: en förälder i en transaktionstabell, annars raden själv eller en person."""
+    """Vårdhändelsen som raden hör till: en förälder i en transaktionstabell, annars raden själv eller en person.
+
+    {"key": nyckel för händelsen, "info": (ålder, kvinna), "own": raden är själv händelsen, "person": (data, index) eller None}
+    """
     def build():
         refs = [r for r in ctx.parents.values() if r is not None]
         ep = next((r for r in refs if r[0].table.category == "transaction"), None)
         person = next((r for r in refs if r[0].table.category == "person"), None)
         if ep is not None:
             data, idx = ep
-            info = (None, None)
+            info, pref = (None, None), person
             for fk in data.table.foreign_keys:  # vårdhändelsens patient
                 pdata = ctx.table_data(fk.ref_table)
                 if pdata is not None and pdata.table.category == "person" and all(c in data.colidx for c in fk.columns):
-                    prow = pdata.find(fk.ref_columns, tuple(data.rows[idx][data.colidx[c]] for c in fk.columns))
-                    if prow is not None:
-                        info = _person_info(pdata, prow)
+                    pos = pdata.position(fk.ref_columns, tuple(data.rows[idx][data.colidx[c]] for c in fk.columns))
+                    if pos is not None:
+                        info, pref = _person_info(pdata, pdata.rows[pos]), (pdata, pos)
                         break
-            return f"{data.table.key}:{idx}", info, False
+            if pref is not None and info == (None, None):
+                info = _person_info(pref[0], pref[0].rows[pref[1]])
+            return {"key": f"{data.table.key}:{idx}", "info": info, "own": False, "person": pref}
         if ctx.table.category == "transaction":
             info = _person_info(person[0], person[0].rows[person[1]]) if person else (None, None)
-            return f"{ctx.table.key}:{ctx.index}", info, True
+            return {"key": f"{ctx.table.key}:{ctx.index}", "info": info, "own": True, "person": person}
         if person is not None:
-            return f"{person[0].table.key}:{person[1]}", _person_info(person[0], person[0].rows[person[1]]), False
+            return {"key": f"{person[0].table.key}:{person[1]}", "info": _person_info(person[0], person[0].rows[person[1]]),
+                    "own": False, "person": person}
         return None
     return ctx.entity("care:episode", build)
+
+
+def _profile(ctx) -> dict | None:
+    ep = _episode(ctx)
+    return patient_profile(ctx.seed, *ep["person"]) if ep and ep["person"] else None
+
+
+def _diag(code: str):
+    return next((d for d in DIAGNOSES if d[0] == code), (code, code, 1))
+
+
+def _acute_pool(age, female, prof):
+    """Diagnoser som kan uppstå akut. Har patienten en profil räknas inte kroniska sjukdomar som hen saknar."""
+    pool = [d for d in DIAGNOSES if _fits(d[0], age, female) and (prof is None or d[0] not in CHRONIC)]
+    return pool or DIAGNOSES
 
 
 def latent_diagnosis(ctx):
     """En dold 'orsak' per vårdhändelse som diagnos, läkemedel och provsvar i olika tabeller kan dela.
 
-    Den väljs deterministiskt utifrån slumpfrö och vårdhändelsens rad, och anpassas till patientens ålder och kön.
+    Har patienten kroniska sjukdomar handlar de flesta kontakter om dem; annars, och ibland ändå, ett akut tillstånd
+    som passar patientens ålder och kön. Valet är deterministiskt per vårdhändelse.
     """
     ep = _episode(ctx)
     if ep is None:
         return None, False
 
     def build():
-        key, (age, female), _ = ep
-        ok = [d for d in DIAGNOSES if _fits(d[0], age, female)] or DIAGNOSES
-        return random.Random(f"{ctx.seed}:{key}").choices(ok, weights=[d[-1] for d in ok], k=1)[0]
-    return ctx.entity("care:latent", build), ep[2]
+        age, female = ep["info"]
+        prof = patient_profile(ctx.seed, *ep["person"]) if ep["person"] else None
+        rnd = random.Random(f"{ctx.seed}:{ep['key']}")
+        if prof and prof["chronic"] and rnd.random() < min(0.8, 0.35 + 0.12 * len(prof["chronic"])):
+            code = rnd.choices(prof["chronic"], weights=[CHRONIC[c]["need"] for c in prof["chronic"]], k=1)[0]
+            return _diag(code)
+        pool = _acute_pool(age, female, prof)
+        return rnd.choices(pool, weights=[d[-1] for d in pool], k=1)[0]
+    return ctx.entity("care:latent", build), ep["own"]
+
+
+def _first_in_episode(ctx) -> bool:
+    seqs = [ctx.parent_seq(c) for c, r in ctx.parents.items() if r is not None and r[0].table.category == "transaction"]
+    return not seqs or seqs[0] == 0
 
 
 def _fits(code: str, age, female) -> bool:
@@ -261,13 +389,21 @@ def diagnosis(ctx, group=""):
             return _pick(ctx, "diagnosis", DIAGNOSES)
         lat, own = latent_diagnosis(ctx)
         ep = _episode(ctx)
+        prof = _profile(ctx)
         if lat is not None:
-            # första diagnosen för en vårdkontakt är dess huvudorsak; följande är oftast andra (bi)diagnoser
-            seqs = [ctx.parent_seq(c) for c, r in ctx.parents.items() if r is not None and r[0].table.category == "transaction"]
-            first = own or not seqs or seqs[0] == 0
-            if ctx.rng.random() < (0.9 if first else 0.2):
+            # första diagnosen för en vårdkontakt är dess huvudorsak; följande är oftast patientens andra sjukdomar (bidiagnoser)
+            first = own or _first_in_episode(ctx)
+            if first and ctx.rng.random() < 0.9:
                 return lat
-        age, female = ep[1] if ep else (None, None)
+            others = [c for c in (prof or {}).get("chronic", []) if c != lat[0]]
+            if not first and others and ctx.rng.random() < 0.7:
+                return _diag(ctx.rng.choice(others))
+            if not first and ctx.rng.random() < 0.15:
+                return lat
+        age, female = ep["info"] if ep else (None, None)
+        if prof is not None:  # bara akuta tillstånd – kroniska sjukdomar som patienten saknar uppstår inte
+            pool = _acute_pool(age, female, prof)
+            return _weighted(ctx.rng, pool, [d[-1] for d in pool])
         for _ in range(12):  # även slumpade diagnoser ska passa patientens ålder och kön
             d = _pick(ctx, "diagnosis", DIAGNOSES)
             if _fits(d[0], age, female):
@@ -282,31 +418,72 @@ def procedure(ctx, group=""):
 
 def drug(ctx, group=""):
     def build():
-        d = None
+        d = strength = None
         if ctx.table.category != "reference":
             lat, _ = latent_diagnosis(ctx)
-            wanted = DIAG_DRUGS.get(lat[0]) if lat is not None else None
-            fitting = [x for x in DRUGS if x[0] in wanted] if wanted else []
-            if fitting and ctx.rng.random() < 0.75:
-                d = ctx.rng.choice(fitting)
+            prof = _profile(ctx)
+            fixed = (prof or {}).get("drugs") or {}
+            first = _first_in_episode(ctx)
+            if lat is not None and lat[0] in fixed and first and ctx.rng.random() < 0.85:
+                d, strength = fixed[lat[0]]  # kontaktens kroniska sjukdom: patientens vanliga preparat
+            elif fixed and (not first or lat is None or lat[0] not in DIAG_DRUGS) and ctx.rng.random() < 0.7:
+                d, strength = fixed[ctx.rng.choice(sorted(fixed))]  # övriga ordinationer: patientens andra stående läkemedel
+            else:
+                wanted = DIAG_DRUGS.get(lat[0]) if lat is not None else None
+                fitting = [x for x in DRUGS if x[0] in wanted] if wanted else []
+                if fitting and ctx.rng.random() < 0.75:
+                    d = ctx.rng.choice(fitting)
         d = d or _pick(ctx, "drug", DRUGS)
-        return {"atc": d[0], "name": d[1], "form": d[2], "strength": ctx.rng.choice(d[3])}
+        return {"atc": d[0], "name": d[1], "form": d[2], "strength": strength or ctx.rng.choice(d[3])}
     return ctx.entity("drug:" + (group or ""), build)
+
+
+def _row_date(ctx):
+    """Radens huvuddatum (t.ex. provtagningsdatum), om tabellen har ett – för att låta värden förändras över tid."""
+    name = ctx.shared.get("care_date_col", "?")
+    if name == "?":
+        name = next((c.name for c in ctx.table.columns if c.kind in ("date", "datetime") and c.generator.startswith("date.")
+                     and c.generator != "date.part"), None)
+        ctx.shared["care_date_col"] = name
+    if not name or ctx.column is not None and ctx.column.name == name:
+        return None
+    try:
+        d = ctx.get(name)
+    except ValueError:
+        return None
+    return d.date() if isinstance(d, datetime) else d if isinstance(d, date) else None
 
 
 def lab(ctx, group=""):
     def build():
         rng = ctx.rng
         pick, bias = None, None
+        prof = None
         if ctx.table.category != "reference":
             lat, _ = latent_diagnosis(ctx)
+            prof = _profile(ctx)
             wanted = DIAG_LABS.get(lat[0]) if lat is not None else None
-            if wanted and rng.random() < 0.6:
+            monitored = sorted({n for c in (prof or {}).get("chronic", []) for n, _ in CHRONIC[c]["labs"]})
+            if wanted and rng.random() < 0.5:
                 name, bias = rng.choice(wanted)
                 pick = next((x for x in LABS if x[0] == name), None)
+            elif monitored and rng.random() < 0.6:  # kronikerns kontrollprover
+                pick = next((x for x in LABS if x[0] == rng.choice(monitored)), None)
         if pick is None:
             pick = LABS[(ctx.index + ctx.offset) % len(LABS)] if ctx.table.category == "reference" else _weighted(rng, LABS, [x[-1] for x in LABS])
         name, unit, lo, hi, dec, _ = pick
+        if prof is not None and name in prof["labs"] and not (bias and rng.random() < 0.6):
+            # patientens egen nivå; avvikande värden hos kroniker närmar sig det normala med tiden (behandlingen verkar)
+            base, mid = prof["labs"][name], (lo + hi) / 2 if lo > 0 else hi / 2
+            if name in prof["effects"]:
+                d = _row_date(ctx)
+                years_ago = max(0.0, (ctx.today - d).days / 365.25) if d else 1.5
+                base = mid + (base - mid) * (0.55 + 0.45 * min(1.0, years_ago / 3))
+            spread = (hi - lo) / 14 if lo > 0 else max(base * 0.18, hi / 20)
+            value = max(lo * 0.4 if lo > 0 else 0.0, rng.gauss(base, spread))
+            value = int(round(value)) if dec == 0 else round(value, dec)
+            return {"name": name, "unit": unit, "low": lo, "high": hi, "value": value,
+                    "flag": "H" if value > hi else "L" if value < lo else None}
         if bias == "H" and rng.random() < 0.6:
             value = hi * rng.uniform(1.05, 1.9)
         elif bias == "L" and rng.random() < 0.6:
@@ -344,7 +521,7 @@ def care_unit(ctx, group=""):
     return ctx.entity("careunit:" + (group or ""), build)
 
 
-_HELP = "Exempelkoder i rätt format; läs in hela kodverket under steg 5 om du behöver fler. Kod och text hör ihop på raden, och diagnos, läkemedel och provsvar som hör till samma vårdkontakt och patient passar ihop. I kodtabeller delas koderna ut i ordning."
+_HELP = "Exempelkoder i rätt format; läs in hela kodverket under Domänbibliotek → Regionens listor och kodverk om du behöver fler. Kod och text hör ihop på raden, och diagnos, läkemedel och provsvar som hör till samma vårdkontakt och patient passar ihop. I kodtabeller delas koderna ut i ordning."
 ICD_FORMATS = ["I10.9 (med punkt)", "I109 (utan punkt)"]
 
 
@@ -359,6 +536,51 @@ def gen_diag_code(ctx, p):
 @register("care.diagnosis_text", "Diagnostext", "Vård", [GROUP], help=_HELP)
 def gen_diag_text(ctx, p):
     return diagnosis(ctx, p["group"])[1]
+
+
+CONTACT_TYPES = ["Besök", "Vårdtillfälle", "Distanskontakt", "Hembesök"]
+VISIT_TYPES = ["Återbesök", "Nybesök", "Akutbesök"]
+
+
+def _person_seq(ctx):
+    """Hur många kontakter patienten redan har fått (0 = den första)."""
+    for c, r in ctx.parents.items():
+        if r is not None and r[0].table.category == "person":
+            return ctx.parent_seq(c)
+    return None
+
+
+@register("care.contact_type", "Kontakttyp (efter orsak)", "Vård", [],
+          help="Besök, vårdtillfälle, distanskontakt eller hembesök utifrån kontaktens orsak: hjärtsvikt, höftfraktur och "
+               "lunginflammation leder oftare till inläggning, kroniker följs ofta upp på distans och de äldsta får hembesök.")
+def gen_contact_type(ctx, p):
+    lat, _ = latent_diagnosis(ctx)
+    prof = _profile(ctx) or {}
+    code = lat[0] if lat else ""
+    if code in INPATIENT:
+        w = [40, 55, 3, 2]
+    elif code in prof.get("chronic", []):
+        w = [62, 4, 26, 8 if (prof.get("age") or 0) >= 80 else 2]
+    else:
+        w = [74, 6, 18, 2]
+    return _weighted(ctx.rng, CONTACT_TYPES, w)
+
+
+@register("care.visit_type", "Besökstyp (efter patientens historik)", "Vård", [],
+          help="Patientens första kontakt är ett nybesök; uppföljning av kroniska sjukdomar är oftast återbesök och akuta tillstånd ofta akutbesök.")
+def gen_visit_type(ctx, p):
+    if _person_seq(ctx) == 0:
+        return "Nybesök"
+    lat, _ = latent_diagnosis(ctx)
+    prof = _profile(ctx) or {}
+    code = lat[0] if lat else ""
+    if code in prof.get("chronic", []):
+        w = [80, 12, 8]
+    elif code in INPATIENT:
+        w = [10, 20, 70]
+    else:
+        w = [15, 45, 40]
+    return _weighted(ctx.rng, VISIT_TYPES, w)
 
 
 @register("care.procedure_code", "Åtgärdskod (KVÅ)", "Vård", [GROUP], help=_HELP)

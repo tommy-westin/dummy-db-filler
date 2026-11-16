@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 output/
 data/
+# teamets gemensamma domänbibliotek – delas manuellt mellan kollegor
+bibliotek/

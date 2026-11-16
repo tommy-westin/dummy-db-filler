@@ -15,9 +15,12 @@ Projekt som använder en egen generator får en kopia av den (Project.custom_gen
 from __future__ import annotations
 
 import copy
+import hashlib
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -67,7 +70,7 @@ LIST_SPECS: list[ListSpec] = [
     ListSpec("region.dental_diagnoses", "Tandvårdsdiagnoser", "Tandvård", _attr(region, "DENTAL_DIAGNOSES"), [("Kod", "text"), ("Text", "text")]),
     ListSpec("region.dental_clinics", "Folktandvårdskliniker", "Tandvård", _attr(region, "_FTV"), [("Klinik", "text")], scalar=True),
     ListSpec("care.diagnoses", "Diagnoser (ICD-10-SE)", "Vård", _attr(care, "DIAGNOSES"), [("Kod", "text"), ("Text", "text"), _WEIGHT],
-             "Vanliga diagnoser. Hela kodverk läses hellre in under 5. Värdelistor → Kodverk."),
+             "Vanliga diagnoser. Hela kodverk läses hellre in under fliken Kodverk."),
     ListSpec("care.procedures", "Åtgärder (KVÅ)", "Vård", _attr(care, "PROCEDURES"), [("Kod", "text"), ("Text", "text"), _WEIGHT]),
     ListSpec("care.drugs", "Läkemedel (ATC)", "Vård", _attr(care, "DRUGS"),
              [("ATC-kod", "text"), ("Substans", "text"), ("Beredningsform", "text"), ("Styrkor", "list"), _WEIGHT],
@@ -260,16 +263,22 @@ _origin: dict[str, str] = {}  # nyckel -> "" (biblioteket) eller "från projekte
 _overrides: set[str] = set()
 _signature = None
 _extra: dict = {}  # bibliotek som lagts på från fil utan att sparas (kommandoradens --bibliotek)
+_codebooks: dict[str, list] = {}  # kodverk: diagnosis / procedure / drug -> [[kod, text], ...]
+_test_pnr: list[str] = []  # officiella testpersonnummer
+CODEBOOK_KINDS = ("diagnosis", "procedure", "drug")
+
+
+def _load_all() -> dict[str, dict]:
+    out = {"generator": {}, "list": {}, "codebook": {}, "testpnr": {}}
+    for kind, key, content in store.lib_items():
+        if kind in out:
+            out[kind][key] = content
+    return out
 
 
 def _load_db() -> tuple[dict, dict]:
-    gens, lists = {}, {}
-    for kind, key, content in store.lib_items():
-        if kind == "generator":
-            gens[key] = content
-        elif kind == "list":
-            lists[key] = content
-    return gens, lists
+    a = _load_all()
+    return a["generator"], a["list"]
 
 
 def refresh(project=None, force: bool = False) -> None:
@@ -280,9 +289,14 @@ def refresh(project=None, force: bool = False) -> None:
     if sig == _signature and not force:
         return
     _signature = sig
-    gens, lists = _load_db()
+    everything = _load_all()
+    gens, lists = everything["generator"], everything["list"]
     gens.update(_extra.get("generators") or {})
     lists.update(_extra.get("lists") or {})
+    _codebooks.clear()
+    _codebooks.update({k: v for k, v in everything["codebook"].items() if v})
+    _codebooks.update(_extra.get("codebooks") or {})
+    _test_pnr[:] = _extra.get("test_pnr") or everything["testpnr"].get("lista") or []
     # listor: återställ originalen och lägg på ändringarna
     for spec in LIST_SPECS:
         _set_list(spec, copy.deepcopy(_ORIGINALS[spec.key]))
@@ -343,6 +357,36 @@ def reset_list(list_key: str) -> None:
     refresh(force=True)
 
 
+def codebook(kind: str) -> list | None:
+    """Ett inläst kodverk i domänbiblioteket (t.ex. hela ICD-10-SE), eller None."""
+    return _codebooks.get(kind)
+
+
+def save_codebook(kind: str, pairs: list[list]) -> None:
+    store.lib_put("codebook", kind, [list(p) for p in pairs])
+    refresh(force=True)
+
+
+def delete_codebook(kind: str) -> None:
+    store.lib_delete("codebook", kind)
+    refresh(force=True)
+
+
+def test_pnr() -> list[str]:
+    """Officiella testpersonnummer i domänbiblioteket (tom lista om inga är inlästa)."""
+    return _test_pnr
+
+
+def save_test_pnr(values: list[str]) -> None:
+    store.lib_put("testpnr", "lista", [str(v).strip() for v in values if str(v).strip()])
+    refresh(force=True)
+
+
+def delete_test_pnr() -> None:
+    store.lib_delete("testpnr", "lista")
+    refresh(force=True)
+
+
 def original_rows(list_key: str) -> list[list]:
     return to_rows(SPECS[list_key], _ORIGINALS[list_key])
 
@@ -369,8 +413,12 @@ def usage(project, key: str) -> list[str]:
 # ---------------------------------------------------------------- dela med teamet
 
 def export_data(include_rules: bool = True) -> dict:
-    gens, lists = _load_db()
-    data = {"generatorer": list(gens.values()), "listor": lists}
+    a = _load_all()
+    data = {"generatorer": list(a["generator"].values()), "listor": a["list"]}
+    if a["codebook"]:
+        data["kodverk"] = a["codebook"]
+    if a["testpnr"].get("lista"):
+        data["testpersonnummer"] = a["testpnr"]["lista"]
     if include_rules:
         data["regler"] = rules.load_rules()
     return data
@@ -391,7 +439,10 @@ def _parse(text: str) -> dict:
     lists = {k: v for k, v in (data.get("listor") or {}).items() if k in SPECS and isinstance(v, list)}
     for k, v in lists.items():
         from_rows(SPECS[k], v)  # kontrollera formatet
-    return {"generators": gens, "lists": lists, "rules": [r for r in data.get("regler") or [] if isinstance(r, dict)]}
+    codebooks = {k: v for k, v in (data.get("kodverk") or {}).items() if k in CODEBOOK_KINDS and isinstance(v, list)}
+    pnr = [str(v) for v in data.get("testpersonnummer") or []]
+    return {"generators": gens, "lists": lists, "rules": [r for r in data.get("regler") or [] if isinstance(r, dict)],
+            "codebooks": codebooks, "test_pnr": pnr}
 
 
 def import_yaml(text: str, include_rules: bool = True) -> dict[str, int]:
@@ -401,6 +452,10 @@ def import_yaml(text: str, include_rules: bool = True) -> dict[str, int]:
         store.lib_put("generator", key, defn)
     for key, rows in data["lists"].items():
         store.lib_put("list", key, rows)
+    for key, pairs in data["codebooks"].items():
+        store.lib_put("codebook", key, pairs)
+    if data["test_pnr"]:
+        store.lib_put("testpnr", "lista", data["test_pnr"])
     n_rules = 0
     if include_rules and data["rules"]:
         current = rules.load_rules()
@@ -410,7 +465,12 @@ def import_yaml(text: str, include_rules: bool = True) -> dict[str, int]:
             rules.save_rules(current + new)
             n_rules = len(new)
     refresh(force=True)
-    return {"generatorer": len(data["generators"]), "listor": len(data["lists"]), "regler": n_rules}
+    out = {"generatorer": len(data["generators"]), "listor": len(data["lists"]), "regler": n_rules}
+    if data["codebooks"]:
+        out["kodverk"] = len(data["codebooks"])
+    if data["test_pnr"]:
+        out["testpersonnummer"] = len(data["test_pnr"])
+    return out
 
 
 def use_file(path: str | Path) -> None:
@@ -418,6 +478,66 @@ def use_file(path: str | Path) -> None:
     global _extra
     _extra = _parse(Path(path).read_text(encoding="utf-8"))
     refresh(force=True)
+
+
+# ---------------------------------------------------------------- den gemensamma mappen
+
+SHARED_FILE = "teamets_bibliotek.yaml"
+
+
+def shared_dir() -> Path:
+    """Mappen där teamets bibliotek delas: bibliotek/ i repot (ignoreras av git), eller DUMMYFILLER_SHARED."""
+    env = os.environ.get("DUMMYFILLER_SHARED")
+    return Path(env) if env else Path(__file__).resolve().parent.parent / "bibliotek"
+
+
+def _file_sig(path: Path) -> str:
+    s = path.stat()
+    return f"{s.st_mtime_ns}:{s.st_size}"
+
+
+def shared_files() -> list[dict]:
+    """Bibliotekfilerna i den gemensamma mappen och när de senast lästes in."""
+    d = shared_dir()
+    out = []
+    for f in sorted(d.glob("*.y*ml")) if d.exists() else []:
+        seen = (store.get_setting(f"shared:{f.name}") or "").split("|")
+        out.append({"name": f.name, "path": f, "modified": datetime.fromtimestamp(f.stat().st_mtime), "imported": seen[0] == _file_sig(f)})
+    return out
+
+
+def sync_shared() -> list[tuple[str, dict]]:
+    """Läser in nya eller ändrade filer i den gemensamma mappen. Teamets version ersätter det som har samma namn."""
+    d = shared_dir()
+    if not d.exists():
+        return []
+    done = []
+    for f in sorted(d.glob("*.y*ml")):
+        key, sig = f"shared:{f.name}", _file_sig(f)
+        prev = (store.get_setting(key) or "|").split("|")
+        if prev[0] == sig:
+            continue
+        text = f.read_text(encoding="utf-8")
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+        if prev[-1] != digest:
+            try:
+                done.append((f.name, import_yaml(text)))
+            except Exception as e:
+                done.append((f.name, {"fel": str(e)}))
+                continue
+        store.set_setting(key, f"{sig}|{digest}")
+    return done
+
+
+def publish(name: str = SHARED_FILE) -> Path:
+    """Skriver hela det lokala biblioteket till den gemensamma mappen, så att det kan delas med kollegorna."""
+    d = shared_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / name
+    text = export_yaml()
+    path.write_text(text, encoding="utf-8")
+    store.set_setting(f"shared:{name}", f"{_file_sig(path)}|{hashlib.sha1(text.encode('utf-8')).hexdigest()}")
+    return path
 
 
 def preview(defn: dict, n: int = 8, locale: str = "sv_SE") -> tuple[list[str], list[list], list[str]]:

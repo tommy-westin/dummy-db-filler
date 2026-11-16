@@ -1,8 +1,8 @@
 """Regionens övriga domäner: ekonomi (budget, leverantörsfakturor), personal och tandvård.
 
 Kontoplan, ansvar, befattningar, löner och tandvårdsåtgärder är exempel i rimligt format – inte regionens
-riktiga kodplan och inte gällande prislistor. Behöver ni de riktiga koderna: läs in dem som värdelistor under
-steg 5, gärna som CSV med kod och benämning så att de hålls ihop radvis.
+riktiga kodplan och inte gällande prislistor. De riktiga koderna läses in i domänbiblioteket (Regionens listor och
+kodverk), som ersätter listorna här i alla projekt.
 
 I tabeller med kategorin 'Referens / kodtabell' delas koderna ut i ordning (en per rad),
 annars slumpas de så att vanliga koder förekommer oftare.

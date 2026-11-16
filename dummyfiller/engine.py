@@ -35,12 +35,17 @@ class TableData:
 
     def find(self, cols: list[str], values: tuple):
         """Slår upp en rad på nyckelvärden (med cache)."""
+        i = self.position(cols, values)
+        return None if i is None else self.rows[i]
+
+    def position(self, cols: list[str], values: tuple) -> int | None:
+        """Radens position, uppslagen på nyckelvärden (med cache)."""
         key = tuple(cols)
         if key not in self._index:
             if any(c not in self.colidx for c in cols):
                 return None
             idx = [self.colidx[c] for c in cols]
-            self._index[key] = {tuple(r[i] for i in idx): r for r in self.rows}
+            self._index[key] = {tuple(r[i] for i in idx): n for n, r in enumerate(self.rows)}
         return self._index[key].get(tuple(values))
 
 
@@ -262,6 +267,8 @@ class _FkPlan:
         self.perm: list[int] = []
         self.assign: list[int] | None = None  # barn per förälder: förälderindex per rad
         self.keymap: dict | None = None  # styrd relation: nyckelvärde -> radindex i föräldern
+        self.cum: list[float] | None = None  # 'efter vårdbehov': kumulativa vikter per förälderrad
+        self.derive: tuple | None = None  # (annan plan, kolumnindex i dess förälder): värdet tas från den andra förälderns rad
         if parent is not None and not is_self:
             self.perm = list(range(len(parent.rows)))
             rng.shuffle(self.perm)
@@ -334,6 +341,14 @@ class _TableGen:
             nullable = all(self.cols[c].nullable for c in fk.columns)
             unique = fk.distribution == "unique" or any(set(u) <= set(fk.columns) for u in self.unique_sets)
             plan = _FkPlan(fk, parent, is_self, unique, nullable, self.rng)
+            if fk.distribution == "need" and parent is not None and not is_self and parent.rows:
+                from .generators import PARENT_WEIGHTS
+                total, cum = 0.0, []
+                for n in range(len(parent.rows)):
+                    w = next((x for x in (h(self.project.seed, parent, n) for h in PARENT_WEIGHTS) if x is not None), 1.0)
+                    total += max(0.0, w)
+                    cum.append(total)
+                plan.cum = cum if total > 0 else None
             if fk.guided and not is_self and not unique and len(fk.columns) == 1 and self.cols[fk.columns[0]].generator in REGISTRY:
                 i = parent.colidx[fk.ref_columns[0]]
                 plan.keymap = {r[i]: n for n, r in enumerate(parent.rows)}
@@ -359,7 +374,21 @@ class _TableGen:
             elif unique and self.n > size and not (nullable and fk.null_pct > 0):
                 self.warn(f"{self.n} rader begärdes men relationen till {fk.ref_table} är en-till-en med {size} föräldrarader – antalet sänks")
                 self.n = size
-        self.plans.sort(key=lambda p: p.keymap is not None)  # styrda relationer sist: de kan bero på radens övriga föräldrar
+        # samma förälder via två vägar: t.ex. Labbsvar → Patient och Labbsvar → Vardkontakt → Patient. Patienten tas då från
+        # vårdkontakten, så att raden aldrig pekar på två olika patienter.
+        for f in self.plans:
+            if f.is_self or f.parent is None:
+                continue
+            for g in self.plans:
+                if g is f or g.is_self or g.parent is None or g.parent is f.parent:
+                    continue
+                h = next((x for x in g.parent.table.foreign_keys if x.ref_table == f.fk.ref_table and x.ref_columns == f.fk.ref_columns
+                          and all(c in g.parent.colidx for c in x.columns)), None)
+                if h is not None and g.derive is None:
+                    f.derive = (g, [g.parent.colidx[c] for c in h.columns])
+                    break
+        # styrda relationer sist (de kan bero på radens övriga föräldrar), härledda efter den plan de härleds ur
+        self.plans.sort(key=lambda p: (p.derive is not None, p.keymap is not None))
         if len(self.plans) > 1 and product_sizes:
             for u in self.unique_sets:
                 if set(u) <= self.fk_cols:
@@ -376,6 +405,17 @@ class _TableGen:
             fk = plan.fk
             if fk.columns[0] in ctx.values:  # redan satt (historik: samma förälder som föregående version)
                 continue
+            if plan.derive is not None:
+                g, cols = plan.derive
+                ref = ctx.parents.get(g.fk.columns[0])
+                if ref is not None:
+                    values = tuple(ref[0].rows[ref[1]][c] for c in cols)
+                    pos = plan.parent.position(fk.ref_columns, values) if None not in values else None
+                    if pos is not None:
+                        for c, v in zip(fk.columns, values):
+                            ctx.values[c] = coerce(v, self.cols[c])
+                            ctx.parents[c] = (plan.parent, pos)
+                        continue
             idx = None
             if plan.is_self:
                 n_prev = len(rows)
@@ -408,6 +448,8 @@ class _TableGen:
                         idx = plan.perm[i % m]
                 elif fk.distribution == "even":
                     idx = plan.perm[(i + attempt) % m]
+                elif fk.distribution == "need" and plan.cum:
+                    idx = rng.choices(range(m), cum_weights=plan.cum, k=1)[0]
                 elif fk.distribution == "skewed":
                     idx = plan.perm[int(m * rng.random() ** 1.5)]
                 else:

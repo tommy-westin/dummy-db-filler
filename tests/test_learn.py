@@ -146,7 +146,7 @@ def test_learn_tab_in_ui(prod):
     app = str(Path(__file__).resolve().parent.parent / "dummyfiller" / "app.py")
     at = AppTest.from_file(app, default_timeout=120)
     at.session_state["project"] = p
-    at.session_state["page"] = "6. Generatorer"
+    at.session_state["section"], at.session_state["lib_page"] = "📚 Domänbibliotek", "Lär från produktion"
     at.session_state["prod_conn"] = {"mode": "Egen SQLAlchemy-URL", "url": str(eng.url), "server": "", "database": "", "auth": dbio.AUTH_MODES[0],
                                      "user": "", "driver": "", "encrypt": True, "trust": True}
     at.run()

@@ -45,6 +45,8 @@ class GenSpec:
 
 REGISTRY: dict[str, GenSpec] = {}
 LIST_REVISION = 0  # ökas när de inbyggda listorna ändras (se library.py), så att cachar byggs om
+# vikter för fördelningen 'efter vårdbehov': funktioner (slumpfrö, föräldratabellens data, radindex) -> vikt eller None
+PARENT_WEIGHTS: list = []
 
 
 def register(key: str, label: str, group: str, params: list[Param] | None = None, help: str = ""):
@@ -158,8 +160,11 @@ def person(ctx, group: str = "") -> dict:
 
 def _test_pnr(ctx):
     """Hämtar nästa officiella testpersonnummer om projektet har en sådan lista. Födelsedatum och kön följer numret."""
-    name = ctx.project.test_pnr_list
+    name = ctx.project.test_pnr_list  # projektets egen lista (äldre projekt), annars domänbibliotekets
     vals = ctx.project.value_lists.get(name) if name else None
+    if not vals:
+        from . import library
+        vals, name = library.test_pnr(), "testpersonnummer i domänbiblioteket"
     if not vals:
         return None
     pool = ctx.shared.get("pnr_pool")
