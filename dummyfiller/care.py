@@ -80,6 +80,7 @@ LABS = [
 CLINICS = ["Medicinkliniken", "Kirurgkliniken", "Ortopedkliniken", "Kardiologkliniken", "Akutkliniken", "Kvinnokliniken",
            "Barn- och ungdomskliniken", "Psykiatriska kliniken", "Ögonkliniken", "Öron-, näs- och halskliniken",
            "Infektionskliniken", "Onkologkliniken", "Hudkliniken", "Urologkliniken", "Neurologkliniken", "Röntgenkliniken"]
+HOME_HSA_ORG = "2321000214"  # organisationsdelen i hemregionens HSA-id (kontrollera mot er HSA-katalog)
 HOSPITAL_TYPES = ["Centralsjukhuset", "Länssjukhuset", "Universitetssjukhuset", "Närsjukhuset", "Lasarettet"]
 
 CARE_NOTES = [
@@ -93,6 +94,8 @@ CARE_NOTES = [
 ]
 
 CARE_PRESETS = {
+    "care_ward": ["Avdelning 108 | 12", "Avdelning 109 | 12", "Avdelning 110 | 10", "Avdelning 204 | 10", "Avdelning 212 | 10",
+                  "Akutvårdsavdelningen (AVA) | 16", "Intensivvårdsavdelningen (IVA) | 6", "Hjärtintensiven (HIA) | 8", "Barnavdelningen | 8", "BB-avdelningen | 8"],
     "care_contact_type": ["Besök | 70", "Vårdtillfälle | 12", "Distanskontakt | 14", "Hembesök | 4"],
     "care_form": ["Primärvård | 55", "Specialiserad öppenvård | 30", "Slutenvård | 10", "Hemsjukvård | 5"],
     "care_profession": ["Läkare | 40", "Sjuksköterska | 28", "Undersköterska | 8", "Fysioterapeut | 8", "Psykolog | 4",
@@ -322,13 +325,17 @@ def care_unit(ctx, group=""):
         rng = ctx.rng
         a = address(ctx, group)
         lan = a["county"]
-        region = "Västra Götalandsregionen" if lan.startswith("Västra Götaland") else "Region " + lan.removesuffix(" län").removesuffix("s")
-        hsa = f"SE{rng.randint(2120000000, 2329999999)}-{''.join(rng.choice(string.ascii_uppercase + string.digits) for _ in range(4))}"
+        home = lan == vocab.HOME_COUNTY
+        region = vocab.HOME_REGION if home else "Västra Götalandsregionen" if lan.startswith("Västra Götaland") else "Region " + lan.removesuffix(" län").removesuffix("s")
+        suffix = "".join(rng.choice(string.ascii_uppercase + string.digits) for _ in range(4))
+        # hemregionens enheter delar organisationsdel i HSA-id; övriga regioner får en påhittad
+        hsa = f"SE{HOME_HSA_ORG if home else rng.randint(2120000000, 2329999999)}-{suffix}"
         if rng.random() < 0.45:
-            return {"unit": f"Vårdcentralen {a['city']}", "clinic": "Vårdcentral", "hospital": None, "form": "Primärvård",
-                    "region": region, "hsa": hsa, "city": a["city"]}
+            place = rng.choice(vocab.OSTERSUND_UNITS) if a["city"] == "Östersund" else a["city"]
+            return {"unit": f"{'Hälsocentralen' if home else 'Vårdcentralen'} {place}", "clinic": "Hälsocentral" if home else "Vårdcentral",
+                    "hospital": None, "form": "Primärvård", "region": region, "hsa": hsa, "city": a["city"]}
         clinic = rng.choice(CLINICS)
-        hospital = f"{rng.choice(HOSPITAL_TYPES)} {a['city']}"
+        hospital = "Östersunds sjukhus" if home else f"{rng.choice(HOSPITAL_TYPES)} {a['city']}"
         inpatient = rng.random() < 0.3
         unit = f"Avdelning {rng.randint(1, 40)}" if inpatient else clinic.replace("kliniken", "mottagningen")
         return {"unit": f"{unit}, {hospital}", "clinic": clinic, "hospital": hospital,
@@ -336,7 +343,7 @@ def care_unit(ctx, group=""):
     return ctx.entity("careunit:" + (group or ""), build)
 
 
-_HELP = "Exempelkoder i rätt format; läs in hela kodverket under steg 4 om du behöver fler. Kod och text hör ihop på raden, och diagnos, läkemedel och provsvar som hör till samma vårdkontakt och patient passar ihop. I kodtabeller delas koderna ut i ordning."
+_HELP = "Exempelkoder i rätt format; läs in hela kodverket under steg 5 om du behöver fler. Kod och text hör ihop på raden, och diagnos, läkemedel och provsvar som hör till samma vårdkontakt och patient passar ihop. I kodtabeller delas koderna ut i ordning."
 ICD_FORMATS = ["I10.9 (med punkt)", "I109 (utan punkt)"]
 
 

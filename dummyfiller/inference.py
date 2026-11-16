@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from datetime import date
 
-from . import care, rules, vocab
+from . import care, region, rules, vocab
 from .care import ICD_FORMATS
 from .generators import CHOICE_MODES, NOTE_THEMES
 from .model import Column, Project, Table
@@ -26,7 +26,7 @@ _PREFIXES = ("dim", "fact", "fakta", "stg", "tbl", "ref", "dw", "d", "f", "t")
 
 
 def table_stem(name: str) -> tuple[str, str]:
-    """Returnerar (prefix, kompakt namn utan prefix), t.ex. DimKund -> ('dim', 'kund')."""
+    """Returnerar (prefix, kompakt namn utan prefix), t.ex. DimPatient -> ('dim', 'patient')."""
     toks = norm(name).split("_")
     prefix = toks[0] if len(toks) > 1 and toks[0] in _PREFIXES else ""
     return prefix, "".join(toks[1:] if prefix else toks)
@@ -66,9 +66,9 @@ SKEW, NORMAL = "Skev (många låga)", "Normal (flest i mitten)"
 _START = ("start", "fran", "from", "borjan", "begin", "inskriv", "intag", "admission", "ankomst", "giltigfr", "validfr", "ordinationsdat", "insatt")
 _END = ("slut", "end", "till", "tom", "upphor", "avslut", "utskriv", "discharge", "expire", "utgang", "validto", "giltigt", "utsatt")
 _CREATED = ("skapad", "created", "registrerad", "insert", "upplagd", "regdatum")
-_ORDERISH = ("order", "faktura", "invoice", "bestall", "kop", "purchase", "bokning", "remiss", "ordination")
+_ORDERISH = ("faktura", "invoice", "bestall", "bokning", "remiss", "ordination", "ankomst", "registrer")
 _UPDATED = ("andrad", "updated", "modified", "uppdaterad", "changed", "senast")
-_DELIVERY = ("leverans", "delivery", "skickad", "shipped", "betald", "paid", "forfall", "due", "svar", "besvarad")
+_DELIVERY = ("betald", "betalning", "paid", "forfall", "due", "svar", "besvarad", "attest")
 _BIRTH = ("fodelse", "fodd", "birth")
 _HIST_FROM = ("giltigfr", "validfr", "gallerfr", "effectivefr")
 _HIST_TO = ("giltigt", "validto", "gallert", "effectiveto")
@@ -83,7 +83,7 @@ def _find(table: Table, col: Column, words, kinds=("date", "datetime")) -> str |
 
 
 def main_date(table: Table) -> Column | None:
-    """Tabellens huvuddatum: första datumkolumnen som inte är slut-, ändrings-, leverans- eller födelsedatum."""
+    """Tabellens huvuddatum: första datumkolumnen som inte är slut-, ändrings-, betalnings- eller födelsedatum."""
     for c in table.columns:
         if c.kind in ("date", "datetime") and not c.computed and not _N(c.name).sub(*_END, *_UPDATED, *_DELIVERY, *_BIRTH, *_HIST_FROM):
             return c
@@ -106,7 +106,7 @@ def _time_link(table: Table, project: Project | None):
         if parent.category == "transaction" and (start := main_date(parent)) is not None:
             end = next((c.name for c in parent.columns if c.kind in ("date", "datetime") and c is not start and _N(c.name).sub(*_END)), "")
             return "after", fk.columns[0], start.name, end
-        if parent.category == "person" and person is None:
+        if parent.category in ("person", "company") and person is None:
             birth = next((c.name for c in parent.columns if c.kind in ("date", "datetime") and _N(c.name).sub(*_BIRTH)), "")
             person = ("chain", fk.columns[0], birth, "")
     return person
@@ -167,17 +167,18 @@ def date_column(table: Table) -> Column | None:
 
 _CAL = ("kalender", "calendar", "datumdim", "dimdatum", "dimdate")
 _REF_END = ("typ", "type", "typer", "status", "kategori", "category", "kod", "code", "koder", "grupp", "group", "klass", "niva", "kodverk", "lookup")
-_TRANS = ("order", "faktura", "invoice", "betalning", "payment", "transaktion", "transaction", "forsaljning", "sales", "purchase",
-          "bokning", "booking", "handelse", "event", "logg", "leverans", "delivery", "vardkontakt", "besok", "visit", "encounter",
-          "vardtillfalle", "admission", "remiss", "referral", "recept", "prescription", "ordination", "labsvar", "provsvar",
-          "labresultat", "labbsvar", "labb", "journal", "arende", "ticket", "avtal", "kontrakt", "matning", "resultat")
-_CODEISH = ("diagnos", "atgard", "lakemedel", "analys", "valuta", "currency", "sprak", "language", "kva", "icd", "atc")
-_PRODUCT = ("produkt", "product", "artikel", "article", "item", "vara", "sortiment")
-_COMPANY = ("foretag", "company", "leverantor", "supplier", "vendor", "organisation", "organization", "bolag", "partner", "tillverkare")
-_PERSON = ("kund", "customer", "person", "anstall", "employee", "medlem", "member", "patient", "student", "anvandare", "user",
-           "kontakt", "contact", "personal", "elev", "larare", "lakare", "vardgivare", "forare", "klient", "client", "saljare", "invanare")
-_LOCATION = ("adress", "address", "ort", "plats", "location", "butik", "store", "lager", "warehouse", "kontor", "office", "land",
-             "country", "region", "kommun", "vardenhet", "klinik", "mottagning", "sjukhus", "avdelning", "enhet", "site")
+_TRANS = ("faktura", "invoice", "betalning", "payment", "transaktion", "transaction", "bokning", "booking", "handelse", "event",
+          "logg", "vardkontakt", "besok", "visit", "encounter", "vardtillfalle", "admission", "remiss", "referral", "recept",
+          "prescription", "ordination", "labsvar", "provsvar", "labresultat", "labbsvar", "labb", "journal", "arende", "ticket",
+          "avtal", "kontrakt", "matning", "resultat", "budget", "utfall", "verifikat", "bokforing", "huvudbok", "reskontra",
+          "franvaro", "loneutbetal", "lonetrans", "lonespec", "anstallning", "behandling", "attest", "bestallning", "tidbok")
+_CODEISH = ("diagnos", "atgard", "lakemedel", "analys", "valuta", "currency", "sprak", "language", "kva", "icd", "atc",
+            "konto", "ansvar", "kostnadsstalle", "verksamhet", "befattning", "franvaroorsak", "projekt")
+_COMPANY = ("foretag", "company", "leverantor", "supplier", "vendor", "organisation", "organization", "bolag", "motpart", "kund", "customer")
+_PERSON = ("person", "anstall", "employee", "medarbetare", "patient", "anvandare", "user", "kontakt", "contact", "personal",
+           "lakare", "tandlakare", "vardgivare", "invanare", "medlem", "member", "elev", "student", "klient", "client")
+_LOCATION = ("adress", "address", "ort", "plats", "location", "kontor", "office", "land", "country", "region", "kommun",
+             "vardenhet", "klinik", "mottagning", "halsocentral", "vardcentral", "sjukhus", "avdelning", "enhet", "site", "fastighet")
 
 
 def infer_category(table: Table) -> str:
@@ -197,8 +198,8 @@ def infer_category(table: Table) -> str:
     if n.sub(*_TRANS):
         return "transaction"
     if n.sub(*_CODEISH):
-        return "reference" if small else "transaction"
-    for words, cat in ((_PRODUCT, "product"), (_COMPANY, "company"), (_PERSON, "person"), (_LOCATION, "location")):
+        return "transaction" if table.foreign_keys else "reference"
+    for words, cat in ((_PERSON, "person"), (_LOCATION, "location"), (_COMPANY, "company")):
         if n.sub(*words):
             return cat
     return "reference" if small else "other"
@@ -215,13 +216,21 @@ def default_rows(table: Table, project: Project | None = None) -> int:
             for prefix, (kind, items) in sizes.items():
                 if c.generator.startswith(prefix):
                     return care.codebook_size(project, kind, items) if project is not None else len(items)
+            for prefix, size in region.SIZES.items():
+                if c.generator.startswith(prefix):
+                    return size
         return 8
+    if cat == "location":  # enhetstabeller: en rad per enhet
+        for c in table.columns:
+            for prefix in ("dental.clinic", "finance.cost_center"):
+                if c.generator.startswith(prefix):
+                    return region.SIZES[prefix]
     if cat == "transaction":
         lines = project is not None and any(
             (p := project.table(fk.ref_table)) is not None and p.category == "transaction" and p.key != table.key
             for fk in table.foreign_keys)
         return 6000 if lines else 2000
-    return {"calendar": 1096, "person": 500, "company": 100, "product": 200, "location": 50, "bridge": 500}.get(cat, 200)
+    return {"calendar": 1096, "person": 500, "company": 100, "location": 50, "bridge": 500}.get(cat, 200)
 
 
 # ---------------------------------------------------------------- kolumner
@@ -231,6 +240,12 @@ def _reference_generator(table: Table, col: Column, n: _N):
     t = _N(table_stem(table.name)[1])
     is_code = n.sub("kod", "code") or (col.length is not None and col.length <= 3)
     special = [
+        (("tandatgard", "tandvardsatgard", "tandbehandling"), "dental.procedure_code", "dental.procedure_text"),
+        (("tanddiagnos",), "dental.diagnosis_code", "dental.diagnosis_text"),
+        (("konto",), "finance.account_code", "finance.account_name"),
+        (("ansvar", "kostnadsstalle"), "finance.cost_center_code", "finance.cost_center_name"),
+        (("verksamhet",), "finance.activity_code", "finance.activity_name"),
+        (("befattning", "yrkestitel"), "hr.title", "hr.title"),
         (("diagnos", "icd"), "care.diagnosis_code", "care.diagnosis_text"),
         (("atgard", "kva", "procedure"), "care.procedure_code", "care.procedure_text"),
         (("lakemedel", "atc", "drug"), "care.atc_code", "care.drug_name"),
@@ -240,16 +255,16 @@ def _reference_generator(table: Table, col: Column, n: _N):
         if t.sub(*words):
             return (code_gen if is_code else text_gen), {}, HIGH
     presets = [
-        (("orderstatus",), "order_status"), (("remisstatus", "remissstatus"), "care_referral_status"),
+        (("fakturastatus", "attestatus", "atteststatus"), "invoice_status"), (("remisstatus", "remissstatus"), "care_referral_status"),
         (("bokningsstatus", "besoksstatus"), "care_booking_status"), (("status",), "status"),
-        (("betal", "payment"), "payment"), (("kanal", "channel"), "channel"), (("prioritet", "priority"), "priority"),
-        (("avdelning", "department"), "department"), (("kundtyp", "segment", "customertype"), "customer_type"),
-        (("roll", "role"), "role"), (("sprak", "language"), "language"), (("farg", "color"), "color"),
-        (("storlek", "size"), "size"), (("enhet", "unit"), "unit"), (("kontakttyp",), "care_contact_type"),
-        (("besokstyp",), "care_visit_type"), (("vardform",), "care_form"), (("yrke", "profession"), "care_profession"),
-        (("triage",), "care_triage"), (("diagnostyp",), "care_diagnosis_type"),
-        (("produktkategori", "varugrupp", "productcategory", "artikelgrupp"), "product_category"),
-        (("kategori", "category"), "category"),
+        (("betalvillkor", "betalningsvillkor"), "payment_terms"), (("betal", "payment"), "payment"),
+        (("prioritet", "priority"), "priority"), (("budgetversion", "budgettyp"), "budget_version"),
+        (("leverantorstyp", "leverantorskategori"), "supplier_type"), (("franvaro",), "hr_absence"),
+        (("anstallningsform",), "hr_employment_form"), (("forvaltning",), "hr_administration"),
+        (("avdelning", "department"), "department"), (("roll", "role"), "role"), (("sprak", "language"), "language"),
+        (("kontakttyp",), "care_contact_type"), (("besokstyp",), "care_visit_type"), (("vardform",), "care_form"),
+        (("yrke", "profession"), "care_profession"), (("triage",), "care_triage"), (("diagnostyp",), "care_diagnosis_type"),
+        (("patienttyp",), "dental_patient_type"), (("kategori", "category"), "category"),
     ]
     for words, name in presets:
         if t.sub(*words):
@@ -313,7 +328,7 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
         # främmande nycklar fylls från föräldratabellen. Kodkolumner inom vård behåller sin generator, som då styr
         # vilken förälderrad som väljs (se ForeignKey.guided); övriga får bara en reserv om föräldern inte genereras.
         plain = _infer(col, table, project, True)
-        if plain[0].startswith("care.") and plain[2] == HIGH:
+        if plain[0].startswith(region.GUIDED) and plain[2] == HIGH and not end("id", "key", "sk"):
             return plain
         if k == "int":
             return "number.int", {"min": 1, "max": 1000, "distribution": "Jämn"}, HIGH
@@ -360,6 +375,30 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
             if part:
                 return "date.part", {"source": src, "part": part}, HIGH
 
+    # --- ekonomi: konto, ansvar, verksamhet, period (surrogatnycklar som KontoID hoppas över)
+    codeish = is_num or sub("kod", "code", "nr", "nummer") or (col.length or 99) <= 8
+    named = sub("namn", "benamning", "text", "name", "beskrivning")
+    if not end("id", "key", "sk"):
+        if sub("kontoklass", "accountclass"):
+            return "finance.account_class", {}, HIGH
+        if sub("kontonamn", "kontotext", "kontobenamning", "accountname"):
+            return "finance.account_name", {}, HIGH
+        if sub("kontonr", "kontonummer", "kontokod", "accountno", "accountcode") or n.c in ("konto", "account"):
+            costs = tn.sub("leverantorsfaktura", "fakturarad", "inkop", "kostnad") and cat != "reference"
+            return "finance.account_code", {"scope": region.ACCOUNT_SCOPES[1 if costs else 0]}, HIGH
+        if sub("kostnadsstalle", "costcenter", "ansvarskod", "ansvarsnr", "ansvarsnamn", "ansvarsenhet") or tok("kst", "ansvar"):
+            return ("finance.cost_center_name" if named or not codeish else "finance.cost_center_code"), {}, HIGH
+        if sub("verksamhetskod", "verksamhetsnr", "verksamhetsnamn", "verksamhetsomrade") or tok("verksamhet", "vht"):
+            return ("finance.activity_name" if named or not codeish else "finance.activity_code"), {}, HIGH
+        if sub("forvaltning") and k == "string":
+            return "finance.administration", {}, HIGH
+        if (tok("period") or sub("bokforingsperiod", "redovisningsperiod", "periodkod")) and k in ("int", "string"):
+            src = next((c.name for c in table.columns if c.kind in ("date", "datetime") and not c.computed and _N(c.name).sub("bokfor", "faktura", "verifikat", "transaktion", "utbetal")), "")
+            fmt = "ÅÅÅÅ-MM" if k == "string" and (col.length or 9) >= 7 else "MM" if (col.length or 9) <= 2 or col.type_raw.lower().startswith("tinyint") else "ÅÅÅÅMM"
+            return "finance.period", {"start": "-2y", "end": "idag", "format": fmt, "source": src}, HIGH
+        if sub("ocr"):
+            return "finance.ocr", {"digits": min(col.length or 12, 16)}, HIGH
+
     if single_pk and k == "int":
         return "sequence", {"start": 1, "step": 1}, HIGH
 
@@ -376,7 +415,7 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
         if sub("fodelse", "fodd", "birth") or tok("dob"):
             return "person.birthdate", {"min_age": 0 if tn.sub("patient", "invanare") else 18, "max_age": 95 if care_ctx else 85}, HIGH
         if sub(*_END) and (base := _find(table, col, _START)):
-            short = sub("utskriv", "discharge")
+            short = sub("utskriv", "discharge") or tn.sub("franvaro", "ledighet", "semester")
             kt = next((c.name for c in table.columns if _N(c.name).sub("kontakttyp", "encountertype")), None)
             if short and kt:  # vårdtiden beror på kontakttypen: besök avslutas samma dag, vårdtillfällen varar flera dagar
                 b = _ident(base)
@@ -384,9 +423,12 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
             return "date.relative", {"base": base, "min_days": 0 if short else 30, "max_days": 12 if short else 730}, HIGH
         if sub("andrad", "updated", "modified", "uppdaterad", "changed", "senast") and (base := _find(table, col, _CREATED)):
             return "date.relative", {"base": base, "min_days": 0, "max_days": 400}, HIGH
-        if sub("leverans", "delivery", "skickad", "shipped", "betald", "paid", "forfall", "due", "svar", "besvarad") and (base := _find(table, col, _ORDERISH)):
-            due = sub("forfall", "due")
-            return "date.relative", {"base": base, "min_days": 30 if due else 1, "max_days": 30 if due else 14}, HIGH
+        status = next((c.name for c in table.columns if c.kind == "string" and _N(c.name).c in ("status", "fakturastatus")), None)
+        if sub("betal", "paid") and col.nullable and status and (base := _find(table, col, _ORDERISH)):
+            return "expression", {"expr": f"{_ident(base)} + days(int(slump(20, 45))) if {_ident(status)} == 'Betald' else None"}, HIGH
+        if sub(*_DELIVERY) and (base := _find(table, col, _ORDERISH)):
+            lo, hi = (30, 30) if sub("forfall", "due") else (20, 45) if sub("betal", "paid") else (1, 14)
+            return "date.relative", {"base": base, "min_days": lo, "max_days": hi}, HIGH
         link = _time_link(table, project) if main_date(table) is col else None
         if link and link[0] == "after":
             return "date.after_parent", {"via": link[1], "column": link[2], "end_column": link[3], "min_days": 0, "max_days": 3}, HIGH
@@ -396,6 +438,27 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
         return "date.between", {"start": "-3y", "end": "idag", "trend": trend}, HIGH if sub("datum", "date", "tid", "time", *_CREATED, *_START) or tok("dt") else LOW
     if k == "time":
         return "time.random", {}, HIGH
+
+    # --- tandvård
+    dental_ctx = tn.sub("tand", "dental", "folktand") or any(_N(c.name).sub("tandnr", "tandnummer", "tooth", "tandyta") for c in table.columns)
+    if sub("tandnr", "tandnummer", "toothno", "tandposition") or tok("tand", "tooth"):
+        return "dental.tooth", {}, HIGH
+    if sub("tandyta", "tandytor", "surface") or tok("yta", "ytor"):
+        return "dental.surface", {}, HIGH
+    if dental_ctx:
+        if sub("atgard", "behandling", "procedure") and not sub("datum", "date"):
+            return ("dental.procedure_code" if codeish and not named else "dental.procedure_text"), {}, HIGH
+        if sub("diagnos") and not sub("diagnostyp"):
+            return ("dental.diagnosis_code" if sub("kod", "code") or (col.length or 99) <= 8 else "dental.diagnosis_text"), {}, HIGH
+        if sub("klinik", "clinic", "mottagning") and k == "string":
+            return "dental.clinic", {}, HIGH
+        if sub("patienttyp") and k == "string":
+            birth = next((c.name for c in table.columns if c.kind in ("date", "datetime") and _N(c.name).sub(*_BIRTH)), None)
+            if birth:  # patienttypen följer åldern
+                return "expression", {"expr": f"'Barn och unga' if year(today()) - year({_ident(birth)}) < 24 else 'Vuxen'"}, HIGH
+            return (*_preset("dental_patient_type"), HIGH)
+        if is_num and sub("pris", "referenspris", "arvode", "belopp", "kostnad", "patientavgift"):
+            return "dental.price", {}, HIGH
 
     # --- vård
     if sub("diagnostyp"):
@@ -422,7 +485,7 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
         return "care.drug_strength", {}, HIGH
     if sub("hsaid", "hsa"):
         return "care.hsa_id", {}, HIGH
-    if sub("vardenhet", "careunit", "mottagning", "vardcentral"):
+    if sub("vardenhet", "careunit", "mottagning", "vardcentral", "halsocentral"):
         return "care.unit_name", {}, HIGH
     if sub("klinik", "clinic") and k == "string":
         return "care.clinic", {}, HIGH
@@ -450,14 +513,27 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
             return "care.lab_flag", {}, HIGH
     if k == "string":
         for words, name in ((("kontakttyp", "encountertype"), "care_contact_type"), (("besokstyp", "visittype"), "care_visit_type"),
-                            (("yrkeskategori", "yrkesroll", "profession", "vardgivarkategori"), "care_profession"),
+                            (("yrkesroll", "profession", "vardgivarkategori"), "care_profession"),
                             (("triage",), "care_triage"), (("remisstatus", "remissstatus"), "care_referral_status"),
                             (("inskrivningssatt", "intagningssatt"), "care_admission"),
                             (("utskrivningssatt", "utskriventill", "utskrivningtill"), "care_discharge")):
             if sub(*words):
                 return (*_preset(name), HIGH)
-        if care_ctx and sub("yrke", "befattning"):
-            return (*_preset("care_profession"), HIGH)
+
+    # --- personal
+    if k == "string":
+        if sub("yrkeskategori", "yrkesgrupp", "personalkategori", "personalgrupp"):
+            return "hr.category", {}, HIGH
+        if sub("befattning", "jobtitle", "yrkestitel", "tjanstetitel", "yrke") or tok("titel"):
+            return "hr.title", {}, HIGH
+        if sub("anstallningsform", "anstform"):
+            return "hr.employment_form", {}, HIGH
+        if sub("franvaroorsak", "franvarotyp", "franvarokod"):
+            return (*_preset("hr_absence"), HIGH)
+        if sub("loneart"):
+            return (*_preset("hr_pay_type"), HIGH)
+    if is_num and sub("sysselsattningsgrad", "tjanstgoringsgrad", "anstallningsgrad", "omfattning"):
+        return "hr.grade", {}, HIGH
 
     # --- person, företag, kontaktuppgifter
     if sub("personnummer", "personnr", "persnr", "socialsecurity") or tok("pnr", "ssn"):
@@ -510,10 +586,6 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
         return "finance.iban", {}, HIGH
     if sub("bankgiro") or tok("bg"):
         return "finance.bankgiro", {}, HIGH
-    if sub("ean", "gtin", "streckkod", "barcode") and not sub("mean", "ocean"):
-        return "faker", {"method": "ean13", "args": ""}, HIGH
-    if tok("sku") or sub("artikelnr", "artikelnummer", "produktnr", "produktnummer", "productnumber", "itemnumber"):
-        return "product.sku", {}, HIGH
 
     # --- tal
     if is_num:
@@ -521,21 +593,44 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
             return (*_num(0 if care_ctx else 18, 95 if care_ctx else 85, NORMAL, col=col), HIGH)
         if sub("patientavgift", "besoksavgift"):
             return (*_preset("care_fee"), HIGH)
-        if sub("pris", "price"):
-            if cat == "product":
-                return "product.price", {}, HIGH
-            return (*_num(10, 2500, SKEW, col=col), HIGH)
         if sub("momssats", "vatrate", "skattesats", "taxrate"):
             return (*_preset("vat_rate"), HIGH)
-        if tok("lon", "salary") or sub("manadslon", "grundlon", "arslon"):
-            return (*_num(24000, 68000, NORMAL, decimals=0, col=col), HIGH)
+        if tok("lon", "salary") or sub("manadslon", "grundlon", "heltidslon"):
+            return "hr.salary", {}, HIGH
+        if sub("arslon"):
+            return (*_num(300000, 900000, NORMAL, decimals=0, col=col), HIGH)
+
+        def numcol(*words, skip=()):
+            for c in table.columns:
+                cn = _N(c.name)
+                if (c is not col and not c.computed and c.kind in ("int", "decimal", "float") and cn.sub(*words)
+                        and not cn.sub("sats", "procent", *skip) and not cn.end("id", "key", "nr")
+                        and c.name not in table.primary_key and table.fk_for(c.name) is None):
+                    return c.name
+            return None
+        scale = col.scale if col.kind == "decimal" and col.scale is not None else 2
+        if sub("utfall", "actual") and (bud := numcol("budget")):  # utfallet hamnar nära budgeten
+            return "expression", {"expr": f"round({_ident(bud)} * slump(0.82, 1.18), {scale})"}, HIGH
+        if sub("avvikelse", "differens") and (bud := numcol("budget")) and (utf := numcol("utfall")):
+            return "expression", {"expr": f"{_ident(utf)} - {_ident(bud)}"}, HIGH
+        if sub("moms", "vat") and (net := numcol("netto", "exklmoms", "exmoms", "beloppexkl")):
+            return "expression", {"expr": f"round({_ident(net)} * 0.25, {scale})"}, HIGH
+        if sub("brutto", "inklmoms", "totalbelopp", "fakturabelopp", "attbetala") and (net := numcol("netto", "exklmoms", "exmoms", "beloppexkl")) and (vat := numcol("moms", "vat", skip=("exkl", "inkl", "netto"))):
+            return "expression", {"expr": f"{_ident(net)} + {_ident(vat)}"}, HIGH
+        if sub("belopp", "amount", "budget", "utfall", "kostnad", "intakt", "netto", "prognos") and any(
+                _N(c.name).sub("konto", "account") and not _N(c.name).end("id", "key") for c in table.columns):
+            return "finance.amount", {"factor": 25.0 if tn.sub("budget", "prognos") else 1.0}, HIGH  # beloppet följer kontot på raden
+        if sub("belopp", "amount") and any(_N(c.name).sub("loneart") for c in table.columns):
+            return (*_num(500, 48000, SKEW, col=col), HIGH)
+        if sub("pris", "price"):
+            return (*_num(10, 2500, SKEW, col=col), HIGH)
         if sub("saldo", "balance"):
             return (*_num(0, 150000, SKEW, col=col), HIGH)
         if sub("rabatt", "discount"):
             return (*_num(0, 30, SKEW, col=col), HIGH)
         if sub("procent", "percent", "andel") or tok("pct"):
             return (*_num(0, 100, col=col), HIGH)
-        if sub("belopp", "amount", "summa", "total", "kostnad", "cost", "avgift", "fee", "intakt", "revenue", "omsattning", "netto", "brutto", "moms", "skatt"):
+        if sub("belopp", "amount", "summa", "total", "kostnad", "cost", "avgift", "fee", "intakt", "budget", "utfall", "prognos", "netto", "brutto", "moms", "skatt"):
             return (*_num(50, 25000, SKEW, col=col), HIGH)
         if sub("antal", "quantity", "kvantitet", "count") or tok("qty"):
             return (*_num(1, 20, SKEW, col=col), HIGH)
@@ -546,13 +641,15 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
         if sub("vardtid", "vardagar", "lengthofstay"):
             return (*_num(1, 21, SKEW, col=col), HIGH)
         if tok("ar", "year", "artal") or end("year", "artal"):
+            per = next((c.name for c in table.columns if c is not col and c.kind == "int" and _N(c.name).tok("period")
+                        and not c.type_raw.lower().startswith("tinyint")), None)
+            if per:  # perioden är ÅÅÅÅMM: året följer av den
+                return "expression", {"expr": f"int({_ident(per)} / 100)"}, HIGH
             return "number.int", {"min": date.today().year - 8, "max": date.today().year, "distribution": "Jämn"}, HIGH
         if sub("manad", "month"):
             return "number.int", {"min": 1, "max": 12, "distribution": "Jämn"}, HIGH
         if sub("betyg", "rating", "score", "poang"):
             return (*_num(1, 5, col=col), HIGH)
-        if sub("lagersaldo", "stock", "inventory", "ilager"):
-            return (*_num(0, 500, SKEW, col=col), HIGH)
         if sub("radnr", "radnummer", "linenumber", "lineno", "lopnr", "sekvens") and table.foreign_keys:
             parent_first = sorted(table.foreign_keys, key=lambda f: (p := project.table(f.ref_table) if project else None) is None or p.category != "transaction")
             return "sequence.per_parent", {"via": parent_first[0].columns[0], "start": 1}, HIGH
@@ -571,13 +668,15 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
                 return (*_preset("care_referral_status"), HIGH)
             if care_ctx and tn.sub("besok", "bokning", "kontakt", "visit"):
                 return (*_preset("care_booking_status"), HIGH)
-            return (*_preset("order_status" if cat == "transaction" else "status"), HIGH)
+            if tn.sub("faktura", "invoice", "attest") or sub("attest", "faktura"):
+                return (*_preset("invoice_status"), HIGH)
+            return (*_preset("case_status" if cat == "transaction" else "status"), HIGH)
         simple = [
+            (("betalvillkor", "betalningsvillkor", "paymentterms"), "payment_terms"),
             (("betalsatt", "betalningssatt", "paymentmethod", "paymenttype", "betalmetod"), "payment"),
-            (("kanal", "channel"), "channel"), (("prioritet", "priority"), "priority"),
-            (("segment", "kundtyp", "customertype", "kundkategori"), "customer_type"),
-            (("sprak", "language"), "language"), (("farg", "color", "colour"), "color"), (("storlek", "size"), "size"),
-            (("valutakod", "currencycode"), "currency_code"),
+            (("prioritet", "priority"), "priority"), (("budgetversion", "budgettyp"), "budget_version"),
+            (("leverantorstyp", "leverantorskategori"), "supplier_type"),
+            (("sprak", "language"), "language"), (("valutakod", "currencycode"), "currency_code"),
         ]
         for words, name in simple:
             if sub(*words):
@@ -585,29 +684,19 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
         if sub("valuta", "currency"):
             return (*_preset("currency_code" if (col.length or 99) <= 5 else "currency"), HIGH)
         if sub("avdelning", "department"):
-            if care_ctx:
-                return "pattern", {"template": "Avdelning ##"}, HIGH
-            return (*_preset("department"), HIGH)
-        if sub("titel", "befattning", "jobtitle", "yrke"):
-            return "faker", {"method": "job", "args": ""}, HIGH
+            return (*_preset("care_ward" if care_ctx else "department"), HIGH)
         if tok("roll", "role") or sub("anvandarroll", "userrole"):
             return (*_preset("role"), HIGH)
-        if sub("enhet", "unit") and not sub("enhets"):
-            return ("product.unit", {}, HIGH) if cat == "product" else (*_preset("unit"), HIGH)
-        if sub("varumarke", "brand") or tok("marke"):
-            return "product.brand", {}, HIGH
-        if sub("kategori", "category", "varugrupp", "produktgrupp", "artikelgrupp"):
-            if cat == "product" or sub("produkt", "product", "artikel", "varu"):
-                return "product.category", {}, HIGH
+        if (tok("enhet") or sub("enhetsnamn", "organisationsenhet", "arbetsplats", "arbetsstalle")) and not care_ctx:
+            return "finance.cost_center_name", {}, HIGH  # organisatorisk enhet
+        if sub("kategori", "category"):
             return (*_preset("category"), LOW)
 
         # --- text: namn
         if sub("foretagsnamn", "companyname", "bolagsnamn", "firmanamn", "leverantorsnamn", "suppliername", "organisationsnamn") or tok("foretag", "company", "bolag", "firma", "tillverkare"):
             return "company.name", {}, HIGH
-        if sub("produktnamn", "productname", "artikelnamn", "itemname", "artikelbenamning"):
-            return "product.name", {}, HIGH
-        if sub("fullname", "fullstandigtnamn", "kundnamn", "customername", "personnamn", "patientnamn", "kontaktperson", "contactname",
-               "employeename", "saljare", "handlaggare", "ansvarig", "lakare", "vardgivare", "skapadav", "andradav", "createdby", "modifiedby"):
+        if sub("fullname", "fullstandigtnamn", "personnamn", "patientnamn", "kontaktperson", "contactname", "employeename", "medarbetare",
+               "handlaggare", "ansvarig", "attestant", "lakare", "vardgivare", "behandlare", "skapadav", "andradav", "createdby", "modifiedby"):
             if sub("skapadav", "andradav", "createdby", "modifiedby"):
                 return "person.username", {"group": "audit"}, HIGH
             return "person.full_name", {"group": "" if cat == "person" else n.c[:12]}, HIGH
@@ -616,9 +705,7 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
                 return "person.full_name", {}, HIGH
             if cat == "company":
                 return "company.name", {}, HIGH
-            if cat == "product":
-                return "product.name", {}, HIGH
-            if tn.sub("vardenhet", "mottagning", "vardcentral", "enhet") and care_ctx:
+            if tn.sub("vardenhet", "mottagning", "vardcentral", "halsocentral", "enhet") and care_ctx:
                 return "care.unit_name", {}, HIGH
             if tn.sub("klinik"):
                 return "care.clinic", {}, HIGH
@@ -626,6 +713,8 @@ def _infer(col: Column, table: Table, project: Project | None = None, _as_plain:
                 return "care.hospital", {}, HIGH
             return "pattern", {"template": f"{table.name} {{seq}}"}, LOW
 
+        if sub("radtext", "fakturatext", "verifikationstext", "transaktionstext", "konteringstext") and any(c.generator.startswith("finance.account") for c in table.columns):
+            return "finance.account_name", {}, HIGH  # radtexten beskriver det som konterats
         if sub("beskrivning", "description", "kommentar", "comment", "notering", "anteckning", "meddelande", "message", "fritext", "anmarkning") or tok("note", "notes", "text", "info"):
             if (col.length or 999) < 40:
                 return "text.words", {"min": 1, "max": 3}, HIGH
@@ -693,7 +782,7 @@ def default_fk_settings(table: Table, project: Project | None) -> None:
     for fk in table.foreign_keys:  # kodkolumn (diagnos, läkemedel …) som pekar på en kodtabell: låt generatorn välja förälder
         parent = project.table(fk.ref_table)
         col = table.column(fk.columns[0]) if len(fk.columns) == 1 else None
-        if parent is not None and parent.key != table.key and col is not None and col.generator.startswith("care."):
+        if parent is not None and parent.key != table.key and col is not None and col.generator.startswith(region.GUIDED):
             fk.guided = True
     if table.category not in ("transaction", "bridge"):
         return
@@ -705,16 +794,18 @@ def default_fk_settings(table: Table, project: Project | None) -> None:
                 return
         return
     driver = False
-    lines = _N(table.name).sub("rad", "line", "detail", "item", "post")
+    tname = _N(table.name)
+    lines = tname.sub("rad", "line", "detail", "item", "post")
+    treat = tname.sub("behandling", "atgard")  # varje besök har minst en behandling
     for fk in table.foreign_keys:
         parent = project.table(fk.ref_table)
         if parent is None or parent.key == table.key:
             continue
         if parent.category == "transaction" and not driver and fk.per_parent_max == 0:
-            fk.per_parent_min, fk.per_parent_max = (1, 5) if lines else (0, 3)
+            fk.per_parent_min, fk.per_parent_max = (1, 5) if lines else (1, 3) if treat else (0, 3)
             driver = True
-        elif parent.category == "person" and fk.distribution == "random":
-            fk.distribution = "skewed"
+        elif parent.category in ("person", "company") and fk.distribution == "random":
+            fk.distribution = "skewed"  # några patienter/leverantörer står för många av händelserna
 
 
 def infer_project(project: Project, tables: list[Table] | None = None, set_rows: bool = True) -> None:
@@ -724,13 +815,13 @@ def infer_project(project: Project, tables: list[Table] | None = None, set_rows:
     for t in targets:  # andra varvet: datumlogik mellan tabeller kräver att alla kategorier är satta
         infer_table(t, project)
     if set_rows:
-        for t in targets:  # efter att alla kategorier är satta (orderrader beror på föräldern)
+        for t in targets:  # efter att alla kategorier är satta (detaljrader beror på föräldern)
             t.rows = default_rows(t, project)
             default_fk_settings(t, project)
 
 
 def suggest_relations(project: Project) -> list[tuple[str, str, str, str]]:
-    """Föreslår relationer utifrån namn: Order.KundID -> Kund.KundID, FactSales.CustomerKey -> DimCustomer.CustomerKey."""
+    """Föreslår relationer utifrån namn: Vardkontakt.PatientID -> Patient.PatientID, FactBudget.KontoKey -> DimKonto.KontoKey."""
     targets = []
     for t in project.tables:
         if len(t.primary_key) == 1 and (pk := t.column(t.primary_key[0])) is not None:

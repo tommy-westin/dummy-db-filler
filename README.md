@@ -11,50 +11,82 @@ ingen data hämtas från internet.
 .\.venv\Scripts\python.exe -m dummyfiller               # startar gränssnittet på http://localhost:8501
 ```
 
-Vill du prova direkt: gå till **1. Källa → DDL-skript** och klicka på **Läs in exempelschema (vård)**.
+Vill du prova direkt: gå till **1. Källa → DDL-skript**, välj ett exempelschema (vård, ekonomi, personal eller
+tandvård) och klicka på **Läs in exempelschema**. Exemplen kan läsas in tillsammans.
+
+Verktyget är anpassat för Region Jämtland Härjedalen: personer och enheter hamnar främst på orter i länet,
+vårdenheter heter hälsocentraler och Östersunds sjukhus, och de inbyggda områdena är vård, ekonomi, personal
+och tandvård.
 
 ## Arbetsgång
 
 | Steg | Vad du gör |
 |---|---|
 | 1. Källa | Läs in schema från SQL Server (endast metadata), från DDL-skript, eller hoppa över och bygg själv. |
-| 2. Tabeller och relationer | Kategorisera tabeller, ange antal rader eller barn per förälder, skapa egna tabeller, lägg till eller föreslå relationer, se relationsdiagrammet. |
-| 3. Kolumner | Granska förslaget per kolumn, byt generator, finjustera parametrar och se en förhandsgranskning direkt. Ställ in historik (SCD2) och spara egna regler. |
-| 4. Värdelistor | Läs in exempelfiler, hela kodverk, testpersonnummer och profil från produktion. Hantera egna regler. |
-| 5. Generera | Välj scenario, ny eller inkrementell körning och eventuell smutsig data. Granska datan och kvalitetsrapporten och skriv till databas, CSV, Parquet eller SQL-skript. |
+| 2. Diagram | Se och redigera allt i ett tabelldiagram: flytta tabeller, dra pilar mellan kolumner för att skapa relationer, godta föreslagna relationer och ändra tabeller och kolumner i sidopanelen. |
+| 3. Tabeller och relationer | Kategorisera tabeller, ange antal rader eller barn per förälder, skapa egna tabeller, lägg till eller föreslå relationer, se relationsdiagrammet. |
+| 4. Kolumner | Granska förslaget per kolumn, byt generator, finjustera parametrar och se en förhandsgranskning direkt. Ställ in historik (SCD2) och spara egna regler. |
+| 5. Värdelistor | Läs in exempelfiler, hela kodverk, testpersonnummer och profil från produktion. Hantera egna regler. |
+| 6. Generera | Välj scenario, ny eller inkrementell körning och eventuell smutsig data. Granska datan och kvalitetsrapporten och skriv till databas, CSV, Parquet eller SQL-skript. |
 
-Projektet (schema, kategorier, generatorer, värdelistor) sparas som en YAML-fil via sidopanelen och kan
-versionshanteras och delas i teamet. Lösenord sparas aldrig.
+Allt du gör sparas automatiskt i en lokal SQLite-databas, `data/dummyfiller.db` i repot, så att arbetet finns
+kvar när sidan laddas om eller appen startas om. I sidopanelen byter du projekt, skapar nya eller kopierar ett
+projekt att experimentera i. Under **Historik** kan du återställa tidigare versioner. En ny version sparas när du
+har arbetat en stund, och det nuvarande innehållet sparas alltid som en version innan en återställning.
+
+Databasen ignoreras av git eftersom den innehåller varje utvecklares eget arbete. För att dela ett projekt med
+teamet eller versionshantera det: **Fil (YAML) → Exportera**. Lösenord sparas aldrig, varken i databasen eller i
+filen. Databasen kan flyttas med miljövariabeln `DUMMYFILLER_DB`.
+
+## Diagrammet
+
+- **Klicka** på en tabellrubrik för att ändra namn, schema, kategori, antal rader och historik, lägga till kolumner
+  eller ta bort tabellen. Klicka på en kolumn för att välja generator och inställningar, med förhandsgranskning
+  under diagrammet. Generatorlistan går att söka i.
+- **Dra från pricken** till höger om en kolumn till en kolumn i en annan tabell för att skapa en relation. Pilen
+  pekar på föräldern; dras den från en nyckel vänds den automatiskt. Olika datatyper går inte att koppla ihop.
+- **Klicka på en pil** för att ändra fördelning, barn per förälder och andel NULL, eller ta bort relationen.
+- **Förslag på relationer** utifrån kolumnnamn visas som streckade pilar med ett plustecken. Klicka för att lägga till.
+- Tabellerna placeras automatiskt (föräldrar till vänster). Flyttar du dem sparas placeringen i projektfilen.
+  Ctrl + scrollhjul zoomar, scrollhjulet panorerar.
+- Kolumner märkta ⚠ är gissningar som är värda att titta på.
+- **⛶ Maximera** i diagrammets verktygsrad döljer sidomenyn och sidhuvudet och låter diagrammet fylla hela
+  fönstret, med redigeringspanelen kvar till höger. Esc eller **✕ Avsluta** går tillbaka. Tryck F11 för helskärm.
+
+Diagrammet är en liten HTML/JavaScript-komponent (`dummyfiller/diagram/index.html`) utan externa bibliotek.
+Övrig logik är Python. En direktlänk som öppnar ett projekt i diagrammet:
+`http://localhost:8501/?projekt=projekt/vard.yaml&steg=2`.
 
 ## Så blir datan verklighetstrogen
 
 - **Automatisk tolkning.** Kolumn- och tabellnamn (svenska och engelska), datatyper och nycklar avgör vilken
   generator varje kolumn får. Kolumner där tolkningen är en gissning märks med ⚠ så att du vet var du bör titta.
 - **Sammanhängande rader.** Förnamn, efternamn, kön, födelsedatum, personnummer och e-post hör ihop på raden.
-  Detsamma gäller ort, postnummer, kommun och län, produktnamn, kategori och pris, samt företag och organisationsnummer.
+  Detsamma gäller ort, postnummer, kommun och län, leverantör och organisationsnummer, konto och belopp,
+  befattning och lön samt tandvårdsåtgärd, tand och pris.
 - **Nycklar och relationer.** Primärnycklar och unika kolumner blir unika, främmande nycklar pekar alltid på
   rader som finns, och tabellerna laddas i beroendeordning. Självrelationer (chef → anställd), kopplingstabeller
   och cirkulära relationer hanteras. Fördelningen över föräldrar kan vara jämn, skev eller en-till-en.
-- **Datumlogik.** Slutdatum hamnar efter startdatum, leveransdatum efter orderdatum, och datumdimensioner fylls
+- **Datumlogik.** Slutdatum hamnar efter startdatum, förfallodatum 30 dagar efter fakturadatum, och datumdimensioner fylls
   med en dag per rad där år, månad, vecka och veckodag härleds från datumet.
-- **Tid mellan tabeller.** En orderrad hamnar aldrig före sin order, ett provsvar hamnar inom sin vårdkontakt och
+- **Tid mellan tabeller.** En fakturarad hamnar aldrig före sin faktura, ett provsvar hamnar inom sin vårdkontakt och
   en vårdkontakt aldrig före patientens födelsedatum. Händelser för samma förälder bildar ett förlopp i tidsordning.
 - **CHECK-villkor och standardvärden** i schemat blir värdelistor och intervall automatiskt.
 - **Reproducerbart.** Samma slumpfrö och samma inställningar ger samma data.
 
 ### Radantal och relationer
 
-- **Barn per förälder.** Ange t.ex. 1–5 på en relation, så följer tabellens radantal av föräldern (orderrader per
-  order, diagnoser per vårdkontakt). Detaljtabeller får detta som utgångsvärde.
+- **Barn per förälder.** Ange t.ex. 1–5 på en relation, så följer tabellens radantal av föräldern (fakturarader per
+  faktura, diagnoser per vårdkontakt). Detaljtabeller får detta som utgångsvärde.
 - **Scenarier.** `liten`, `mellan` och `stor` multiplicerar radantalen (inte kodtabeller och kalendrar). Egna
-  scenarier läggs till under steg 5.
+  scenarier läggs till under steg 6.
 - **Styrda relationer.** När en kodkolumn pekar på en kodtabell väljs föräldern utifrån kolumnens generator, så
   att t.ex. diagnosen passar patienten.
 
 ### Data warehouse
 
 - **Historik (SCD2).** Tabeller med giltig från/till får flera versioner per affärsnyckel med giltighetstider som
-  inte överlappar, och en flagga för aktuell version. Känns igen automatiskt och ställs in under steg 3.
+  inte överlappar, och en flagga för aktuell version. Känns igen automatiskt och ställs in under steg 4.
 - **Inkrementella körningar.** Lägg nya rader ovanpå befintlig data: löpnummer fortsätter efter de befintliga,
   datum hamnar från och med valt datum, och nya rader pekar på föräldrar som redan finns i databasen.
 - **Smutsig data.** Blanksteg, blandade versaler, tomma strängar, formatvariationer, dubbletter och föräldralösa
@@ -73,15 +105,15 @@ versionshanteras och delas i teamet. Lösenord sparas aldrig.
 |---|---|
 | Egna värden med vikt | `Aktiv \| 80`, `Inaktiv \| 20` – du bestämmer värden och fördelning. |
 | Värdelista / exempelfil | Värden från en inläst fil: som de är, i ordning, eller som förlaga för nya värden med samma mönster. Kolumner från samma CSV-fil kan hållas ihop radvis. |
-| Mönster | `ORD-{seq:06}`, `??-####`, `{Fornamn}.{Efternamn}@example.com` |
-| Egna värden beroende på annan kolumn | `Privat: Kort \| 60, Swish \| 40` / `Företag: Faktura` – samband mellan kolumner. |
-| Formel | `round(Antal * Pris, 2)`, `Startdatum + days(30)`, `'Ja' if Belopp > 1000 else 'Nej'` |
-| Datum relativt annan kolumn | T.ex. 1–14 dagar efter orderdatum. |
-| Datum efter eller inom förälderns datum | Orderrad efter orderdatum, provsvar inom vårdkontakten. |
-| Datum i förlopp per förälder | Händelser för samma kund eller patient i tidsordning med rimliga avstånd. |
-| Löpnummer per förälder | Radnummer 1, 2, 3 … som börjar om för varje order. |
+| Mönster | `FAK-{seq:06}`, `??-####`, `{Fornamn}.{Efternamn}@example.com` |
+| Egna värden beroende på annan kolumn | `Vårdtillfälle: Slutenvård` / `Besök: Primärvård \| 60, Specialiserad öppenvård \| 40` – samband mellan kolumner. |
+| Formel | `round(BeloppExklMoms * 0.25, 2)`, `Startdatum + days(30)`, `'Ja' if Belopp > 1000 else 'Nej'` |
+| Datum relativt annan kolumn | T.ex. förfallodatum 30 dagar efter fakturadatum. |
+| Datum efter eller inom förälderns datum | Fakturarad efter fakturadatum, provsvar inom vårdkontakten. |
+| Datum i förlopp per förälder | Händelser för samma patient, anställd eller leverantör i tidsordning med rimliga avstånd. |
+| Löpnummer per förälder | Radnummer 1, 2, 3 … som börjar om för varje faktura. |
 | Del av datum | År, kvartal, månad, veckodag m.m. från en datumkolumn. |
-| Kopiera värde från relaterad tabell | Denormaliserade kolumner, t.ex. kundnamn på en order. |
+| Kopiera värde från relaterad tabell | Denormaliserade kolumner, t.ex. leverantörsnamn på en faktura. |
 | Tal | Intervall med jämn, normal eller skev fördelning. |
 | Valfri Faker-metod | Allt som biblioteket Faker kan generera. |
 
@@ -98,12 +130,24 @@ Första diagnosen per kontakt är huvuddiagnos, vårdtiden beror på kontakttype
 ligger i tidsordning.
 
 Kodlistorna är ett litet urval exempelkoder i rätt format, inte kompletta kodverk. Hela kodverk (t.ex.
-Socialstyrelsens ICD-10-SE och KVÅ som Excel eller text) läses in under **4. Värdelistor → Kodverk**. De vanliga
+Socialstyrelsens ICD-10-SE och KVÅ som Excel eller text) läses in under **5. Värdelistor → Kodverk**. De vanliga
 koderna förblir vanliga och resten förekommer mer sällan. I tabeller med kategorin *Referens / kodtabell* delas
 koderna ut i ordning, en per rad.
 
+### Ekonomi, personal och tandvård
+
+| Område | Innehåll |
+|---|---|
+| Ekonomi | Kontoplan (konto, benämning, kontoklass), ansvar/kostnadsställe med förvaltning, verksamhet, redovisningsperiod, belopp som är rimliga för kontot, OCR-nummer, fakturastatus, betalvillkor och budgetversion. Moms och fakturabelopp räknas fram, utfall hamnar nära budget, betalningsdatum finns bara på betalda fakturor och verksamheten följer ansvaret. |
+| Personal | Befattning, yrkeskategori, månadslön som passar befattningen, anställningsform, sysselsättningsgrad, frånvaroorsak och löneart. Frånvaro per anställd ligger i tidsordning och varar dagar. |
+| Tandvård | Åtgärdskod och text, pris, tandnummer, tandytor och diagnos som hör ihop (en fyllning på tre ytor får tre ytor på en tand av rätt slag), samt folktandvårdskliniker i länet. |
+
+Kontoplanen, ansvarskoderna, befattningarna, lönenivåerna och tandvårdspriserna är exempel i rimligt format, inte
+regionens riktiga kodplan eller gällande prislistor. De riktiga koderna läser ni in som värdelistor (CSV med kod
+och benämning hålls ihop radvis), eller hämtar via profil från produktion.
+
 **Testpersonnummer:** läs in Skatteverkets testpersonnummer som värdelista och välj den under
-**4. Värdelistor → Testpersonnummer**. Då används bara de numren, och födelsedatum och kön följer numret.
+**5. Värdelistor → Testpersonnummer**. Då används bara de numren, och födelsedatum och kön följer numret.
 
 ## Kommandorad
 
@@ -143,12 +187,14 @@ Anslutningen tas från projektfilen (eller `--url`). Lösenord för SQL-inloggni
 | `dummyfiller/ddl.py` | Tolk för `CREATE TABLE` / `ALTER TABLE` |
 | `dummyfiller/dbio.py` | Anslutning, schemainläsning och laddning (SQLAlchemy + pyodbc) |
 | `dummyfiller/inference.py` | Kategorier, generatorförslag och relationsförslag |
-| `dummyfiller/generators.py`, `care.py`, `vocab.py` | Generatorer och inbyggda ordlistor |
+| `dummyfiller/generators.py`, `care.py`, `region.py`, `vocab.py` | Generatorer och inbyggda ordlistor (vård; ekonomi, personal, tandvård; orter) |
 | `dummyfiller/engine.py` | Laddordning, nycklar, unika värden, typanpassning |
 | `dummyfiller/export.py`, `valuelists.py` | Filexport och inläsning av exempelfiler |
 | `dummyfiller/dirty.py`, `quality.py` | Smutsig data och kvalitetsrapport |
 | `dummyfiller/prodprofile.py`, `rules.py` | Profil från produktion och egna regler |
 | `dummyfiller/app.py`, `__main__.py` | Webbgränssnittet (Streamlit) och kommandoraden |
+| `dummyfiller/store.py` | Automatisk sparning och versionshistorik i SQLite |
+| `dummyfiller/diagram/index.html`, `edit.py` | Tabelldiagrammet och redigering av struktur (byta namn, koppla, placera) |
 
 En ny generator läggs till med dekoratorn `@register(...)` i `generators.py`; parameterlistan blir
 automatiskt ett formulär i gränssnittet.

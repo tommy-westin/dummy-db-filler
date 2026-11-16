@@ -73,7 +73,7 @@ def _build_labels():
 
 # ---------------------------------------------------------------- hjälpfunktioner
 
-GROUP = Param("group", "Grupp", "str", "", help="Kolumner med samma grupp hör till samma person/företag/adress/produkt på raden. Ange t.ex. 'kontakt' om tabellen har två olika personer per rad.")
+GROUP = Param("group", "Grupp", "str", "", help="Kolumner med samma grupp hör till samma person/företag/adress på raden. Ange t.ex. 'kontakt' om tabellen har två olika personer per rad.")
 
 
 def slug(s: str) -> str:
@@ -207,20 +207,6 @@ def address(ctx, group: str = "") -> dict:
     return ctx.entity("address:" + (group or ""), build)
 
 
-def product(ctx, group: str = "") -> dict:
-    def build():
-        rng = ctx.rng
-        cats = list(vocab.PRODUCT_CATEGORIES.items())
-        cat, (items, (lo, hi), unit, _) = _weighted(rng, cats, [c[1][3] for c in cats])
-        item = rng.choice(items)
-        name = " ".join(x for x in (rng.choice(vocab.BRANDS), item, rng.choice(vocab.VARIANTS)) if x)
-        raw = lo + (hi - lo) * rng.betavariate(1.2, 4)
-        price = round(raw) - 1 if raw >= 100 else round(raw * 2) / 2
-        return {"category": cat, "name": name, "price": max(price, 5), "unit": unit, "brand": name.split(" ")[0],
-                "sku": f"{slug(cat)[:3].upper()}-{rng.randint(10000, 99999)}"}
-    return ctx.entity("product:" + (group or ""), build)
-
-
 # ---------------------------------------------------------------- nycklar och tekniska värden
 
 @register("sequence", "Löpnummer", "Nycklar", [
@@ -237,8 +223,8 @@ def gen_uuid(ctx, p):
 
 
 @register("pattern", "Mönster", "Nycklar", [
-    Param("template", "Mall", "str", "{seq:06}", help="# = siffra, ? = versal, {seq} = löpnummer, {seq:06} = löpnummer med nollor, {Kolumnnamn} = värdet i en annan kolumn. Exempel: ORD-{seq:06} eller ??-####"),
-], help="Bygger värden efter en mall, t.ex. ordernummer eller koder.")
+    Param("template", "Mall", "str", "{seq:06}", help="# = siffra, ? = versal, {seq} = löpnummer, {seq:06} = löpnummer med nollor, {Kolumnnamn} = värdet i en annan kolumn. Exempel: FAK-{seq:06} eller ??-####"),
+], help="Bygger värden efter en mall, t.ex. fakturanummer, anställningsnummer eller koder.")
 def gen_pattern(ctx, p):
     out = []
     for m in re.finditer(r"\{([^}]+)\}|#|\?|.", str(p["template"]), flags=re.S):
@@ -461,7 +447,7 @@ def gen_orgnr(ctx, p):
 
 @register("company.email", "E-postadress (företag)", "Företag", [GROUP])
 def gen_company_email(ctx, p):
-    return f"{ctx.rng.choice(['info', 'kontakt', 'order', 'ekonomi'])}@{company(ctx, p['group'])['slug']}.example.com"
+    return f"{ctx.rng.choice(['info', 'kontakt', 'faktura', 'ekonomi'])}@{company(ctx, p['group'])['slug']}.example.com"
 
 
 @register("company.website", "Webbplats", "Företag", [GROUP])
@@ -487,20 +473,6 @@ for _k, _l in [("street", "Gatuadress"), ("postcode", "Postnummer"), ("city", "O
 def gen_address_full(ctx, p):
     a = address(ctx, p["group"])
     return f"{a['street']}, {a['postcode']} {a['city']}"
-
-
-# ---------------------------------------------------------------- produkt
-
-def _prod(key, label):
-    @register(f"product.{key}", label, "Produkt", [GROUP], help="Namn, kategori, pris och enhet hör ihop på raden.")
-    def gen(ctx, p, _key=key):
-        return product(ctx, p["group"])[_key]
-    return gen
-
-
-for _k, _l in [("name", "Produktnamn"), ("category", "Produktkategori"), ("price", "Pris (rimligt för kategorin)"),
-               ("unit", "Enhet"), ("brand", "Varumärke"), ("sku", "Artikelnummer")]:
-    _prod(_k, _l)
 
 
 # ---------------------------------------------------------------- tal
@@ -573,7 +545,7 @@ def _add_time(ctx, d: date, mode: str):
     Param("trend", "Fördelning", "select", TRENDS[0], TRENDS),
     Param("weekdays_only", "Endast vardagar", "bool", False),
     Param("time", "Klockslag (för datetime)", "select", TIME_MODES[0], TIME_MODES),
-    Param("floor_via", "Tidigast enligt förälder (främmande nyckel)", "fk", "", help="Valfritt: datumet hamnar aldrig före ett datum i föräldraraden, t.ex. patientens födelsedatum eller kundens registreringsdatum."),
+    Param("floor_via", "Tidigast enligt förälder (främmande nyckel)", "fk", "", help="Valfritt: datumet hamnar aldrig före ett datum i föräldraraden, t.ex. patientens födelsedatum eller leverantörens registreringsdatum."),
     Param("floor_column", "Förälderns datumkolumn", "parent_column", "", via="floor_via"),
 ])
 def gen_date_between(ctx, p):
@@ -599,7 +571,7 @@ def gen_date_sequence(ctx, p):
 @register("date.relative", "Datum relativt annan kolumn", "Datum", [
     Param("base", "Utgå från kolumn", "column", ""),
     Param("min_days", "Minst antal dagar efter", "int", 1), Param("max_days", "Högst antal dagar efter", "int", 14, help="Negativa tal ger datum före baskolumnen."),
-], help="T.ex. leveransdatum 1–14 dagar efter orderdatum, eller slutdatum efter startdatum.")
+], help="T.ex. förfallodatum 30 dagar efter fakturadatum, eller slutdatum efter startdatum.")
 def gen_date_relative(ctx, p):
     base = ctx.get(p["base"])
     if base is None:
@@ -648,7 +620,7 @@ def gen_time(ctx, p):
 
 # ---------------------------------------------------------------- text
 
-NOTE_THEMES = ["Allmänt (order, kund, leverans)", "Vård (journalanteckning)"]
+NOTE_THEMES = ["Administration (ekonomi, personal, ärenden)", "Vård (journalanteckning)"]
 
 
 @register("text.note", "Anteckning (svensk mening)", "Text", [Param("theme", "Tema", "select", NOTE_THEMES[0], NOTE_THEMES)])
@@ -695,7 +667,7 @@ def gen_bankgiro(ctx, p):
     Param("min_gap", "Minst dagar till nästa händelse", "int", 7), Param("max_gap", "Högst dagar till nästa händelse", "int", 120),
     Param("floor_column", "Tidigast enligt förälderns datumkolumn", "parent_column", "", via="via", help="Valfritt, t.ex. födelsedatum."),
     Param("time", "Klockslag (för datetime)", "select", TIME_MODES[1], TIME_MODES),
-], help="Rader med samma förälder bildar ett förlopp: första händelsen får ett slumpat datum, varje följande hamnar ett antal dagar efter den förra. Passar vårdkontakter per patient eller ordrar per kund.")
+], help="Rader med samma förälder bildar ett förlopp: första händelsen får ett slumpat datum, varje följande hamnar ett antal dagar efter den förra. Passar vårdkontakter per patient eller fakturor per leverantör.")
 def gen_date_chain(ctx, p):
     a, b = _window(ctx, p["start"], p["end"], p["via"], p["floor_column"])
     ref = ctx.parent_ref(p["via"])
@@ -724,7 +696,7 @@ def gen_date_chain(ctx, p):
     Param("min_days", "Minst dagar efter start", "int", 0), Param("max_days", "Högst dagar efter start", "int", 3, help="Används när slutdatum saknas."),
     Param("start", "Om föräldern saknas: från", "str", "-3y"), Param("end", "Om föräldern saknas: till", "str", "idag"),
     Param("time", "Klockslag (för datetime)", "select", TIME_MODES[0], TIME_MODES),
-], help="Håller ihop tiden mellan tabeller: en orderrad hamnar efter orderdatum, ett provsvar inom vårdkontakten.")
+], help="Håller ihop tiden mellan tabeller: en fakturarad hamnar efter fakturadatum, ett provsvar inom vårdkontakten.")
 def gen_date_after_parent(ctx, p):
     ref = ctx.parent_ref(p["via"])
     base = ctx.parent_value(p["via"], p["column"]) if ref is not None and p["column"] else None
@@ -749,7 +721,7 @@ def gen_date_after_parent(ctx, p):
 
 @register("sequence.per_parent", "Löpnummer per förälder", "Nycklar", [
     Param("via", "Förälder (främmande nyckel)", "fk", ""), Param("start", "Startvärde", "int", 1),
-], help="1, 2, 3 … som börjar om för varje förälder – t.ex. radnummer på orderrader.")
+], help="1, 2, 3 … som börjar om för varje förälder – t.ex. radnummer på fakturarader.")
 def gen_seq_per_parent(ctx, p):
     seq = ctx.parent_seq(p["via"])
     return int(p["start"]) + (seq if seq is not None else ctx.index)
@@ -757,7 +729,7 @@ def gen_seq_per_parent(ctx, p):
 
 @register("choice.by", "Egna värden beroende på annan kolumn", "Egna värden", [
     Param("column", "Styrande kolumn", "column", ""),
-    Param("mapping", "Regler", "text", "Privat: Kort | 60, Swish | 40\nFöretag: Faktura | 90, Kort | 10\n*: Kort",
+    Param("mapping", "Regler", "text", "Vårdtillfälle: Slutenvård\nBesök: Primärvård | 60, Specialiserad öppenvård | 40\n*: Primärvård",
           help="En rad per värde i den styrande kolumnen: 'värde: alternativ | vikt, alternativ | vikt'. Raden '*' gäller alla övriga värden."),
 ], help="Skapar samband mellan kolumner: vilka värden som är möjliga, och hur vanliga de är, beror på en annan kolumn på raden.")
 def gen_choice_by(ctx, p):
@@ -781,13 +753,13 @@ def gen_choice_by(ctx, p):
 @register("parent.lookup", "Kopiera värde från relaterad tabell", "Relation", [
     Param("via", "Via främmande nyckel (kolumn)", "fk", ""),
     Param("column", "Kolumn i föräldratabellen", "parent_column", "", via="via"),
-], help="Hämtar ett värde från den förälderrad som främmande nyckeln pekar på – för denormaliserade kolumner, t.ex. kundnamn på en order.")
+], help="Hämtar ett värde från den förälderrad som främmande nyckeln pekar på – för denormaliserade kolumner, t.ex. leverantörsnamn på en order.")
 def gen_parent_lookup(ctx, p):
     return ctx.parent_value(p["via"], p["column"])
 
 
 @register("expression", "Formel", "Relation", [
-    Param("expr", "Uttryck", "str", "", help="Räkna med andra kolumner på raden, t.ex. Antal * Pris, round(Belopp * 0.25, 2), Startdatum + days(30) eller 'Ja' if Belopp > 1000 else 'Nej'. Funktioner: round, min, max, abs, int, float, str, len, upper, lower, concat, coalesce, days, year, month, today, slump(a, b), col('Kolumn med mellanslag')."),
+    Param("expr", "Uttryck", "str", "", help="Räkna med andra kolumner på raden, t.ex. Antal * Belopp, round(Belopp * 0.25, 2), Startdatum + days(30) eller 'Ja' if Belopp > 1000 else 'Nej'. Funktioner: round, min, max, abs, int, float, str, len, upper, lower, concat, coalesce, days, year, month, today, slump(a, b), col('Kolumn med mellanslag')."),
 ])
 def gen_expression(ctx, p):
     return evaluate(str(p["expr"]), ctx)
@@ -858,5 +830,6 @@ def evaluate(expr: str, ctx):
 
 
 from . import care  # noqa: E402,F401  (registrerar vårdgeneratorerna)
+from . import region  # noqa: E402,F401  (ekonomi, personal, tandvård)
 
 _build_labels()

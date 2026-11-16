@@ -16,34 +16,34 @@ from dummyfiller.model import Column, ForeignKey, Project, Table
 ROOT = Path(__file__).resolve().parent.parent
 
 SALES = """
-CREATE TABLE dbo.Kund (
-    KundID int IDENTITY(1,1) NOT NULL PRIMARY KEY,
-    Kundnamn nvarchar(80) NOT NULL,
-    Kundtyp nvarchar(20) NOT NULL CONSTRAINT CK_Kundtyp CHECK (Kundtyp IN ('Privat', 'Företag')),
+CREATE TABLE dbo.Leverantor (
+    LeverantorID int IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    Leverantorsnamn nvarchar(80) NOT NULL,
+    Leverantorstyp nvarchar(20) NOT NULL CONSTRAINT CK_Leverantorstyp CHECK (Leverantorstyp IN ('Företag', 'Myndighet')),
     Registrerad date NOT NULL,
-    Kreditgrans decimal(10,2) NOT NULL CHECK ([Kreditgrans] >= 0 AND [Kreditgrans] <= 5000),
+    Beloppsgrans decimal(10,2) NOT NULL CHECK ([Beloppsgrans] >= 0 AND [Beloppsgrans] <= 5000),
     Sparrad bit NOT NULL DEFAULT ((0)),
     Status varchar(10) NOT NULL DEFAULT ('Aktiv'),
     CONSTRAINT CK_Status CHECK ([Status]='Vilande' OR [Status]='Aktiv')
 );
-CREATE TABLE dbo.KundOrder (
-    OrderID int NOT NULL PRIMARY KEY,
-    KundID int NOT NULL REFERENCES dbo.Kund (KundID),
-    Orderdatum date NOT NULL,
-    Betalsatt nvarchar(20) NULL
+CREATE TABLE dbo.Leverantorsfaktura (
+    FakturaID int NOT NULL PRIMARY KEY,
+    LeverantorID int NOT NULL REFERENCES dbo.Leverantor (LeverantorID),
+    Fakturadatum date NOT NULL,
+    Betalvillkor nvarchar(20) NULL
 );
-CREATE TABLE dbo.Orderrad (
-    OrderradID int NOT NULL PRIMARY KEY,
-    OrderID int NOT NULL REFERENCES dbo.KundOrder (OrderID),
+CREATE TABLE dbo.Fakturarad (
+    FakturaradID int NOT NULL PRIMARY KEY,
+    FakturaID int NOT NULL REFERENCES dbo.Leverantorsfaktura (FakturaID),
     Radnr int NOT NULL,
     Antal int NOT NULL CHECK (Antal BETWEEN 1 AND 4),
-    Pris decimal(10,2) NOT NULL,
-    Leveransdatum date NULL
+    Belopp decimal(10,2) NOT NULL,
+    Bokforingsdatum date NULL
 );
-CREATE TABLE dbo.DimKund (
-    KundKey int IDENTITY(1,1) NOT NULL PRIMARY KEY,
-    Kundnummer varchar(20) NOT NULL,
-    Kundnamn nvarchar(80) NOT NULL,
+CREATE TABLE dbo.DimLeverantor (
+    LeverantorKey int IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    Leverantorsnummer varchar(20) NOT NULL,
+    Leverantorsnamn nvarchar(80) NOT NULL,
     Ort nvarchar(60) NULL,
     Telefon varchar(20) NULL,
     GiltigFran date NOT NULL,
@@ -79,81 +79,81 @@ def rows_of(res, key):
 
 def test_checks_and_defaults():
     p = sales()
-    kund = p.table("dbo.Kund")
+    kund = p.table("dbo.Leverantor")
     assert len(kund.checks) == 3 and kund.column("Status").default == "('Aktiv')"
     checks = parse_checks(kund)
-    assert checks["Kundtyp"]["values"] == ["Privat", "Företag"] and checks["Status"]["values"] == ["Vilande", "Aktiv"]
-    assert checks["Kreditgrans"] == {"min": 0.0, "max": 5000.0}
+    assert checks["Leverantorstyp"]["values"] == ["Företag", "Myndighet"] and checks["Status"]["values"] == ["Vilande", "Aktiv"]
+    assert checks["Beloppsgrans"] == {"min": 0.0, "max": 5000.0}
     res = generate(p)
-    kunder = rows_of(res, "dbo.Kund")
-    assert {k["Kundtyp"] for k in kunder} == {"Privat", "Företag"}
-    status = Counter(k["Status"] for k in kunder)
+    leverantorer = rows_of(res, "dbo.Leverantor")
+    assert {k["Leverantorstyp"] for k in leverantorer} == {"Företag", "Myndighet"}
+    status = Counter(k["Status"] for k in leverantorer)
     assert set(status) == {"Aktiv", "Vilande"} and status["Aktiv"] > status["Vilande"]  # standardvärdet väger tyngst
-    assert all(0 <= k["Kreditgrans"] <= 5000 for k in kunder)
-    assert sum(k["Sparrad"] for k in kunder) < len(kunder) * 0.3
-    assert all(1 <= r["Antal"] <= 4 for r in rows_of(res, "dbo.Orderrad"))
+    assert all(0 <= k["Beloppsgrans"] <= 5000 for k in leverantorer)
+    assert sum(k["Sparrad"] for k in leverantorer) < len(leverantorer) * 0.3
+    assert all(1 <= r["Antal"] <= 4 for r in rows_of(res, "dbo.Fakturarad"))
 
 
 def test_children_per_parent_and_time_logic():
     p = sales()
-    fk = p.table("dbo.Orderrad").foreign_keys[0]
+    fk = p.table("dbo.Fakturarad").foreign_keys[0]
     assert (fk.per_parent_min, fk.per_parent_max) == (1, 5)
-    assert p.table("dbo.Orderrad").column("Radnr").generator == "sequence.per_parent"
-    assert 400 <= estimated_rows(p, p.table("dbo.Orderrad")) <= 800
+    assert p.table("dbo.Fakturarad").column("Radnr").generator == "sequence.per_parent"
+    assert 400 <= estimated_rows(p, p.table("dbo.Fakturarad")) <= 800
     res = generate(p)
-    order = {o["OrderID"]: o for o in rows_of(res, "dbo.KundOrder")}
+    order = {o["FakturaID"]: o for o in rows_of(res, "dbo.Leverantorsfaktura")}
     per = defaultdict(list)
-    for r in rows_of(res, "dbo.Orderrad"):
-        per[r["OrderID"]].append(r)
+    for r in rows_of(res, "dbo.Fakturarad"):
+        per[r["FakturaID"]].append(r)
     assert set(per) == set(order) and all(1 <= len(v) <= 5 for v in per.values())
     assert all([r["Radnr"] for r in v] == list(range(1, len(v) + 1)) for v in per.values())
-    # ordrar per kund bildar ett förlopp i tiden och ligger aldrig före kundens registrering... (floor saknas här: ingen födelsedatumkolumn)
-    assert p.table("dbo.KundOrder").column("Orderdatum").generator == "date.chain"
-    per_kund = defaultdict(list)
+    # fakturor per leverantör bildar ett förlopp i tiden
+    assert p.table("dbo.Leverantorsfaktura").column("Fakturadatum").generator == "date.chain"
+    per_lev = defaultdict(list)
     for o in order.values():
-        per_kund[o["KundID"]].append(o["Orderdatum"])
-    assert all(v == sorted(v) for v in per_kund.values())
-    # leveransdatum hör till raden; orderradens datum hamnar aldrig före orderns
-    p.table("dbo.Orderrad").column("Leveransdatum").generator = "date.after_parent"
-    p.table("dbo.Orderrad").column("Leveransdatum").params = {"via": "OrderID", "column": "Orderdatum", "min_days": 1, "max_days": 9}
+        per_lev[o["LeverantorID"]].append(o["Fakturadatum"])
+    assert all(v == sorted(v) for v in per_lev.values())
+    # fakturaradens bokföringsdatum hamnar aldrig före fakturans datum
+    p.table("dbo.Fakturarad").column("Bokforingsdatum").generator = "date.after_parent"
+    p.table("dbo.Fakturarad").column("Bokforingsdatum").params = {"via": "FakturaID", "column": "Fakturadatum", "min_days": 1, "max_days": 9}
     res = generate(p)
-    for r in rows_of(res, "dbo.Orderrad"):
-        if r["Leveransdatum"] is not None:
-            assert timedelta(days=1) <= r["Leveransdatum"] - order[r["OrderID"]]["Orderdatum"] <= timedelta(days=9)
+    for r in rows_of(res, "dbo.Fakturarad"):
+        if r["Bokforingsdatum"] is not None:
+            assert timedelta(days=1) <= r["Bokforingsdatum"] - order[r["FakturaID"]]["Fakturadatum"] <= timedelta(days=9)
 
 
 def test_conditional_values_and_scenarios():
     p = sales()
-    order = p.table("dbo.KundOrder")
-    order.columns.append(Column.from_type("Kundtyp", "nvarchar(20)", custom=True))
-    c = order.column("Kundtyp")
-    c.generator, c.params = "parent.lookup", {"via": "KundID", "column": "Kundtyp"}
-    b = order.column("Betalsatt")
-    b.generator, b.params = "choice.by", {"column": "Kundtyp", "mapping": "Privat: Kort | 60, Swish | 40\nFöretag: Faktura\n*: Kontant"}
+    order = p.table("dbo.Leverantorsfaktura")
+    order.columns.append(Column.from_type("Leverantorstyp", "nvarchar(20)", custom=True))
+    c = order.column("Leverantorstyp")
+    c.generator, c.params = "parent.lookup", {"via": "LeverantorID", "column": "Leverantorstyp"}
+    b = order.column("Betalvillkor")
+    b.generator, b.params = "choice.by", {"column": "Leverantorstyp", "mapping": "Företag: 30 dagar | 60, 20 dagar | 40\nMyndighet: 60 dagar\n*: Kontant"}
     res = generate(p)
     seen = defaultdict(set)
-    for o in rows_of(res, "dbo.KundOrder"):
-        seen[o["Kundtyp"]].add(o["Betalsatt"])
-    assert seen["Företag"] == {"Faktura"} and seen["Privat"] == {"Kort", "Swish"}
+    for o in rows_of(res, "dbo.Leverantorsfaktura"):
+        seen[o["Leverantorstyp"]].add(o["Betalvillkor"])
+    assert seen["Myndighet"] == {"60 dagar"} and seen["Företag"] == {"30 dagar", "20 dagar"}
     small = generate(p, scale=0.1)
-    assert len(small.data["dbo.Kund"].rows) == 20 and len(small.data["dbo.KundOrder"].rows) == 20
+    assert len(small.data["dbo.Leverantor"].rows) == 10 and len(small.data["dbo.Leverantorsfaktura"].rows) == 20
 
 
 def test_history_scd2():
     p = sales()
-    dim = p.table("dbo.DimKund")
+    dim = p.table("dbo.DimLeverantor")
     assert dim.history["enabled"] and dim.history["from"] == "GiltigFran" and dim.history["current"] == "ArAktuell"
     dim.history.update(min=2, max=4)
     dim.rows = 60
     res = generate(p)
-    rows = rows_of(res, "dbo.DimKund")
+    rows = rows_of(res, "dbo.DimLeverantor")
     by_key = defaultdict(list)
     for r in rows:
-        by_key[r["Kundnummer"]].append(r)
+        by_key[r["Leverantorsnummer"]].append(r)
     assert len(by_key) == 60 and len(rows) > 60
-    assert len({r["KundKey"] for r in rows}) == len(rows)  # surrogatnyckeln är unik
+    assert len({r["LeverantorKey"] for r in rows}) == len(rows)  # surrogatnyckeln är unik
     for versions in by_key.values():
-        assert len({v["Kundnamn"] for v in versions}) == 1  # stabila attribut följer med
+        assert len({v["Leverantorsnamn"] for v in versions}) == 1  # stabila attribut följer med
         assert [v["ArAktuell"] for v in versions] == [False] * (len(versions) - 1) + [True]
         assert versions[-1]["GiltigTill"] is None
         for a, b in zip(versions, versions[1:]):
@@ -168,44 +168,44 @@ def test_incremental_append(tmp_path):
     eng = sa.create_engine(f"sqlite:///{tmp_path / 'a.db'}")
     first = generate(p)
     dbio.write_database(eng, first, create_missing=True)
-    n_orders = len(first.data["KundOrder"].rows)
-    n_lines = len(first.data["Orderrad"].rows)
+    n_orders = len(first.data["Leverantorsfaktura"].rows)
+    n_lines = len(first.data["Fakturarad"].rows)
     since = date.today() - timedelta(days=1)
-    ap = dbio.prepare_append(eng, p, {"KundOrder", "Orderrad"}, since, 0.2)
-    assert ap.counts["KundOrder"] == n_orders and ap.maxima["KundOrder"]["OrderID"] == n_orders
+    ap = dbio.prepare_append(eng, p, {"Leverantorsfaktura", "Fakturarad"}, since, 0.2)
+    assert ap.counts["Leverantorsfaktura"] == n_orders and ap.maxima["Leverantorsfaktura"]["FakturaID"] == n_orders
     res = generate(p, append=ap)
-    assert res.order == ["KundOrder", "Orderrad"] and "Kund" in res.existing
-    new = rows_of(res, "KundOrder")
-    assert len(new) == 10 and min(o["OrderID"] for o in new) == n_orders + 1
-    assert all(o["Orderdatum"] >= since for o in new)
-    kund_ids = set(first.data["Kund"].column_values("KundID"))
-    assert all(o["KundID"] in kund_ids for o in new)
-    lines = rows_of(res, "Orderrad")
-    assert {r["OrderID"] for r in lines} == {o["OrderID"] for o in new} and min(r["OrderradID"] for r in lines) == n_lines + 1
+    assert res.order == ["Leverantorsfaktura", "Fakturarad"] and "Leverantor" in res.existing
+    new = rows_of(res, "Leverantorsfaktura")
+    assert len(new) == 10 and min(o["FakturaID"] for o in new) == n_orders + 1
+    assert all(o["Fakturadatum"] >= since for o in new)
+    lev_ids = set(first.data["Leverantor"].column_values("LeverantorID"))
+    assert all(o["LeverantorID"] in lev_ids for o in new)
+    lines = rows_of(res, "Fakturarad")
+    assert {r["FakturaID"] for r in lines} == {o["FakturaID"] for o in new} and min(r["FakturaradID"] for r in lines) == n_lines + 1
     dbio.write_database(eng, res)
     with eng.connect() as conn:
-        assert conn.execute(sa.text("SELECT COUNT(*) FROM KundOrder")).scalar() == n_orders + 10
-        assert conn.execute(sa.text("SELECT COUNT(*) FROM Orderrad o JOIN KundOrder k ON k.OrderID = o.OrderID")).scalar() == n_lines + len(lines)
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM Leverantorsfaktura")).scalar() == n_orders + 10
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM Fakturarad o JOIN Leverantorsfaktura k ON k.FakturaID = o.FakturaID")).scalar() == n_lines + len(lines)
 
 
 def test_dirty_data_and_quality_report():
     p = sales()
-    order = p.table("dbo.KundOrder")
+    order = p.table("dbo.Leverantorsfaktura")
     order.foreign_keys[0].source = "manual"  # relation som inte finns i databasen -> föräldralösa tillåts
-    p.dirty = {"tables": ["dbo.Kund", "dbo.KundOrder"], "pct": 10, "kinds": ["whitespace", "case", "duplicates", "orphans"]}
+    p.dirty = {"tables": ["dbo.Leverantor", "dbo.Leverantorsfaktura"], "pct": 10, "kinds": ["whitespace", "case", "duplicates", "orphans"]}
     res = generate(p)
     assert res.dirty_log
-    names = res.data["dbo.Kund"].column_values("Kundnamn")
+    names = res.data["dbo.Leverantor"].column_values("Leverantorsnamn")
     assert any(n != n.strip() for n in names)
-    assert len(set(res.data["dbo.Kund"].column_values("KundID"))) == len(names)  # nycklar rörs inte
+    assert len(set(res.data["dbo.Leverantor"].column_values("LeverantorID"))) == len(names)  # nycklar rörs inte
     rel = {r["Tabell"]: r for r in quality.relation_report(res)}
-    assert rel["dbo.KundOrder"]["Föräldralösa"] > 0 and rel["dbo.Orderrad"]["Föräldralösa"] == 0
+    assert rel["dbo.Leverantorsfaktura"]["Föräldralösa"] > 0 and rel["dbo.Fakturarad"]["Föräldralösa"] == 0
     assert all(r["Dubbletter"] == 0 for r in quality.key_report(res))
     p.dirty = {}
     clean = generate(p)
     assert not clean.dirty_log
-    cols = {r["Kolumn"]: r for r in quality.column_report(clean.data["dbo.Kund"])}
-    assert cols["Kundtyp"]["Unika värden"] == 2 and cols["KundID"]["Vanligaste värden"] == "alla unika"
+    cols = {r["Kolumn"]: r for r in quality.column_report(clean.data["dbo.Leverantor"])}
+    assert cols["Leverantorstyp"]["Unika värden"] == 2 and cols["LeverantorID"]["Vanligaste värden"] == "alla unika"
 
 
 def care_project() -> Project:
@@ -270,22 +270,22 @@ def test_codebook_and_test_pnr():
 def test_profile_sql_and_apply():
     p = sales()
     sql = prodprofile.build_profile_sql(p, 50, 5)
-    assert "FROM [dbo].[Kund] WHERE [Kundtyp] IS NOT NULL GROUP BY [Kundtyp] HAVING COUNT_BIG(*) >= 5" in sql
-    assert "[Kundnamn] IS NOT NULL GROUP BY" not in sql and "N'KundID', 'value'" not in sql  # identifierande kolumner och nycklar ingår inte
+    assert "FROM [dbo].[Leverantor] WHERE [Leverantorstyp] IS NOT NULL GROUP BY [Leverantorstyp] HAVING COUNT_BIG(*) >= 5" in sql
+    assert "[Leverantorsnamn] IS NOT NULL GROUP BY" not in sql and "N'LeverantorID', 'value'" not in sql  # identifierande kolumner och nycklar ingår inte
     csv = ("tabell;kolumn;matt;varde;antal\n"
-           "dbo.Kund;;rows;NULL;40000\n"
-           "dbo.Kund;Kundtyp;value;Privat;36000\ndbo.Kund;Kundtyp;value;Företag;4000\n"
-           "dbo.Kund;Kreditgrans;min;100.000000;NULL\ndbo.Kund;Kreditgrans;max;900.000000;NULL\ndbo.Kund;Kreditgrans;avg;300.000000;NULL\n"
-           "dbo.Kund;Registrerad;min;2019-02-01;NULL\ndbo.Kund;Registrerad;max;2024-06-30;NULL\n"
-           "dbo.KundOrder;;rows;NULL;100000\ndbo.KundOrder;Betalsatt;null;NULL;25000\n")
+           "dbo.Leverantor;;rows;NULL;40000\n"
+           "dbo.Leverantor;Leverantorstyp;value;Företag;36000\ndbo.Leverantor;Leverantorstyp;value;Myndighet;4000\n"
+           "dbo.Leverantor;Beloppsgrans;min;100.000000;NULL\ndbo.Leverantor;Beloppsgrans;max;900.000000;NULL\ndbo.Leverantor;Beloppsgrans;avg;300.000000;NULL\n"
+           "dbo.Leverantor;Registrerad;min;2019-02-01;NULL\ndbo.Leverantor;Registrerad;max;2024-06-30;NULL\n"
+           "dbo.Leverantorsfaktura;;rows;NULL;100000\ndbo.Leverantorsfaktura;Betalvillkor;null;NULL;25000\n")
     done = prodprofile.apply_profile(p, prodprofile.parse_profile(csv), True, 0.01)
     assert done["radantal"] == 2 and done["värdefördelningar"] == 1 and done["talintervall"] == 1 and done["datumintervall"] == 1
-    assert p.table("dbo.Kund").rows == 400 and p.table("dbo.KundOrder").column("Betalsatt").null_pct == 25.0
+    assert p.table("dbo.Leverantor").rows == 400 and p.table("dbo.Leverantorsfaktura").column("Betalvillkor").null_pct == 25.0
     res = generate(p)
-    kunder = rows_of(res, "dbo.Kund")
-    typ = Counter(k["Kundtyp"] for k in kunder)
-    assert typ["Privat"] > 300 and all(100 <= k["Kreditgrans"] <= 900 for k in kunder)
-    assert all(date(2019, 2, 1) <= k["Registrerad"] <= date(2024, 6, 30) for k in kunder)
+    leverantorer = rows_of(res, "dbo.Leverantor")
+    typ = Counter(k["Leverantorstyp"] for k in leverantorer)
+    assert typ["Företag"] > 300 and all(100 <= k["Beloppsgrans"] <= 900 for k in leverantorer)
+    assert all(date(2019, 2, 1) <= k["Registrerad"] <= date(2024, 6, 30) for k in leverantorer)
 
 
 def test_user_rules():
@@ -307,11 +307,55 @@ def test_cli(tmp_path, capsys):
     p.save(path)
     assert main(["generate", str(path), "--target", "csv", "--out", str(tmp_path / "csv"), "--scenario", "liten"]) == 0
     assert "rader skrivna" in capsys.readouterr().out
-    assert len((tmp_path / "csv" / "Kund.csv").read_text(encoding="utf-8-sig").splitlines()) == 21
+    assert len((tmp_path / "csv" / "Leverantor.csv").read_text(encoding="utf-8-sig").splitlines()) == 11
     url = f"sqlite:///{tmp_path / 'cli.db'}"
     assert main(["generate", str(path), "--target", "db", "--url", url, "--create-missing"]) == 0
     assert main(["generate", str(path), "--target", "db", "--url", url, "--append", "--fraction", "10"]) == 0
     with sa.create_engine(url).connect() as conn:
-        assert conn.execute(sa.text("SELECT COUNT(*) FROM KundOrder")).scalar() == 220
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM Leverantorsfaktura")).scalar() == 220
     assert main(["profile-sql", str(path), "--out", str(tmp_path / "profil.sql")]) == 0
     assert "COUNT_BIG" in (tmp_path / "profil.sql").read_text(encoding="utf-8-sig")
+
+
+def test_region_domains_examples():
+    """Ekonomi, personal och tandvård: exempelscheman ska ge sammanhängande data utan varningar och utan gissningar."""
+    tables = []
+    for name in ("ekonomi", "personal", "tandvard"):
+        t, warns = parse_ddl((ROOT / "exempel" / f"{name}.sql").read_text(encoding="utf-8"))
+        assert not warns
+        tables += t
+    p = Project(tables=tables)
+    infer_project(p)
+    cats = {t.name: t.category for t in p.tables}
+    assert cats["Konto"] == cats["Ansvar"] == cats["TandvardsAtgard"] == "reference" and cats["Leverantor"] == "company"
+    assert cats["Budget"] == cats["Franvaro"] == cats["Tandbehandling"] == "transaction" and cats["Organisationsenhet"] == "location"
+    assert "product" not in cats.values()
+    for t in p.tables:
+        t.rows = min(t.rows, 300)
+    res = generate(p)
+    assert not res.warnings
+    konto = dict(zip(res.data["dbo.Konto"].column_values("Kontonr"), res.data["dbo.Konto"].column_values("Kontonamn")))
+    assert konto["5011"] == "Månadslön" and len(konto) == 29
+    for f in rows_of(res, "dbo.Leverantorsfaktura"):
+        assert f["Fakturabelopp"] == f["BeloppExklMoms"] + f["Moms"] and (f["Forfallodatum"] - f["Fakturadatum"]).days == 30
+        assert (f["Betalningsdatum"] is not None) == (f["Status"] == "Betald")
+    for r in rows_of(res, "dbo.Fakturarad"):
+        assert r["Kontonr"][0] != "3" and r["Radtext"] == konto[r["Kontonr"]]  # bara kostnadskonton; radtexten följer kontot
+        assert r["Period"] == r["Bokforingsdatum"].year * 100 + r["Bokforingsdatum"].month
+    for b in rows_of(res, "dbo.Budget"):
+        assert b["Ar"] == b["Period"] // 100 and b["Avvikelse"] == b["Utfall"] - b["Budgetbelopp"]
+    from dummyfiller.region import TITLES
+    pay = {t[0]: (t[1], t[2], t[3]) for t in TITLES}
+    for a in rows_of(res, "dbo.Anstalld"):
+        cat, lo, hi = pay[a["Befattning"]]
+        assert a["Yrkeskategori"] == cat and lo <= a["Manadslon"] <= hi
+    assert all(0 <= (f["TillDatum"] - f["FranDatum"]).days <= 12 for f in rows_of(res, "dbo.Franvaro"))
+    codes = set(res.data["dbo.TandvardsAtgard"].column_values("Atgardskod"))
+    for b in rows_of(res, "dbo.Tandbehandling"):
+        assert b["Atgardskod"] in codes
+        if b["Atgardskod"] in ("704", "705", "706"):
+            assert b["Tandnummer"] % 10 >= 4 and len(b["Tandyta"]) >= int(b["Atgardskod"]) - 703
+        if b["Atgardskod"] in ("101", "111"):
+            assert b["Tandnummer"] is None and b["Tandyta"] is None
+    orter = Counter(res.data["dbo.Tandvardspatient"].column_values("Ort"))
+    assert orter.most_common(1)[0][0] == "Östersund"

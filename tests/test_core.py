@@ -159,9 +159,9 @@ def test_value_lists_and_merge():
 
 
 def test_suggest_relations():
-    kund = Table("DimKund", columns=[Column.from_type("KundKey", "int", nullable=False)], primary_key=["KundKey"])
-    fact = Table("FactOrder", columns=[Column.from_type("OrderKey", "int", nullable=False), Column.from_type("KundKey", "int")], primary_key=["OrderKey"])
-    assert suggest_relations(Project(tables=[kund, fact])) == [("dbo.FactOrder", "KundKey", "dbo.DimKund", "KundKey")]
+    dim = Table("DimPatient", columns=[Column.from_type("PatientKey", "int", nullable=False)], primary_key=["PatientKey"])
+    fact = Table("FactVardkontakt", columns=[Column.from_type("VardkontaktKey", "int", nullable=False), Column.from_type("PatientKey", "int")], primary_key=["VardkontaktKey"])
+    assert suggest_relations(Project(tables=[dim, fact])) == [("dbo.FactVardkontakt", "PatientKey", "dbo.DimPatient", "PatientKey")]
 
 
 def test_sqlite_roundtrip_and_exports(care, tmp_path):
@@ -169,19 +169,19 @@ def test_sqlite_roundtrip_and_exports(care, tmp_path):
     eng = sa.create_engine(f"sqlite:///{tmp_path / 't.db'}")
     with eng.begin() as conn:
         conn.execute(sa.text("PRAGMA foreign_keys=ON"))
-        conn.execute(sa.text("CREATE TABLE kund (kund_id INTEGER PRIMARY KEY, namn VARCHAR(80) NOT NULL, epost VARCHAR(120), skapad DATETIME)"))
-        conn.execute(sa.text("CREATE TABLE kundorder (order_id INTEGER PRIMARY KEY, kund_id INTEGER NOT NULL REFERENCES kund(kund_id), "
-                             "orderdatum DATE NOT NULL, belopp NUMERIC(12,2), status VARCHAR(20))"))
+        conn.execute(sa.text("CREATE TABLE leverantor (leverantor_id INTEGER PRIMARY KEY, namn VARCHAR(80) NOT NULL, epost VARCHAR(120), skapad DATETIME)"))
+        conn.execute(sa.text("CREATE TABLE faktura (faktura_id INTEGER PRIMARY KEY, leverantor_id INTEGER NOT NULL REFERENCES leverantor(leverantor_id), "
+                             "fakturadatum DATE NOT NULL, belopp NUMERIC(12,2), status VARCHAR(20))"))
     tables = dbio.reflect(eng)
     p = Project(tables=tables)
     infer_project(p)
-    assert p.table("kundorder").foreign_keys[0].ref_table == "kund"
-    extra = Table("extra", schema="", custom=True, columns=[Column.from_type("id", "int", nullable=False), Column.from_type("kund_id", "int")], primary_key=["id"], rows=20)
-    extra.foreign_keys.append(ForeignKey(["kund_id"], "kund", ["kund_id"], source="manual"))
+    assert p.table("faktura").foreign_keys[0].ref_table == "leverantor"
+    extra = Table("extra", schema="", custom=True, columns=[Column.from_type("id", "int", nullable=False), Column.from_type("leverantor_id", "int")], primary_key=["id"], rows=20)
+    extra.foreign_keys.append(ForeignKey(["leverantor_id"], "leverantor", ["leverantor_id"], source="manual"))
     p.tables.append(extra)
     infer_table(extra, p)
-    p.table("kund").columns.append(Column.from_type("saknas_i_db", "varchar(10)", custom=True))
-    infer_table(p.table("kund"), p)
+    p.table("leverantor").columns.append(Column.from_type("saknas_i_db", "varchar(10)", custom=True))
+    infer_table(p.table("leverantor"), p)
     for t in p.tables:
         t.rows = min(t.rows, 120)
     res = generate(p)
@@ -189,15 +189,15 @@ def test_sqlite_roundtrip_and_exports(care, tmp_path):
     with pytest.raises(RuntimeError):
         dbio.write_database(eng, res)
     written, warns = dbio.write_database(eng, res, create_missing=True)
-    assert written == {"kund": 120, "kundorder": 120, "extra": 20} and any("saknas_i_db" in w for w in warns)
+    assert written == {"leverantor": 100, "faktura": 120, "extra": 20} and any("saknas_i_db" in w for w in warns)
     with eng.connect() as conn:
-        assert conn.execute(sa.text("SELECT COUNT(*) FROM kundorder o JOIN kund k ON k.kund_id = o.kund_id")).scalar() == 120
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM faktura o JOIN leverantor k ON k.leverantor_id = o.leverantor_id")).scalar() == 120
         assert conn.execute(sa.text("SELECT COUNT(*) FROM extra")).scalar() == 20
     with pytest.raises(Exception):  # samma nycklar igen -> allt rullas tillbaka
         dbio.write_database(eng, res)
     dbio.write_database(eng, res, empty_first=True)
     with eng.connect() as conn:
-        assert conn.execute(sa.text("SELECT COUNT(*) FROM kund")).scalar() == 120
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM leverantor")).scalar() == 100
 
     care_res = generate(care, max_rows=40)
     assert len(export.write_csv(care_res, tmp_path / "csv")) == 9

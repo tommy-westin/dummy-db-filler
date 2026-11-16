@@ -11,21 +11,22 @@ if str(ROOT) not in sys.path:  # så att paketet hittas även utan installation
 
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
+import streamlit.components.v1 as components  # noqa: E402
 
 from datetime import date, timedelta  # noqa: E402
 
-from dummyfiller import care, dbio, export, prodprofile, quality, rules, valuelists  # noqa: E402
+from dummyfiller import care, dbio, edit, export, prodprofile, quality, rules, store, valuelists  # noqa: E402
 from dummyfiller.ddl import parse_ddl  # noqa: E402
 from dummyfiller.dirty import KINDS as DIRTY_KINDS  # noqa: E402
 from dummyfiller.engine import estimated_rows, generate, load_order  # noqa: E402
 from dummyfiller.generators import LABEL_TO_KEY, LIST_MODES, REGISTRY, defaults, label_of  # noqa: E402
 from dummyfiller.inference import (default_fk_settings, default_rows, infer_column, infer_table, norm,  # noqa: E402
                                    suggest_relations)
-from dummyfiller.model import CATEGORIES, DISTRIBUTIONS, Column, ForeignKey, Project, Table, merge_tables  # noqa: E402
+from dummyfiller.model import CATEGORIES, DISTRIBUTIONS, Column, ForeignKey, Project, Table, merge_tables, parse_type  # noqa: E402
 
 st.set_page_config(page_title="Dummyfiller", page_icon="🧪", layout="wide")
 ss = st.session_state
-PAGES = ["1. Källa", "2. Tabeller och relationer", "3. Kolumner", "4. Värdelistor", "5. Generera"]
+PAGES = ["1. Källa", "2. Diagram", "3. Tabeller och relationer", "4. Kolumner", "5. Värdelistor", "6. Generera"]
 CAT_LABELS = list(CATEGORIES.values())
 CAT_BY_LABEL = {v: k for k, v in CATEGORIES.items()}
 DIST_LABELS = list(DISTRIBUTIONS.values())
@@ -33,13 +34,62 @@ DIST_BY_LABEL = {v: k for k, v in DISTRIBUTIONS.items()}
 GEN_LABELS = [label_of(k) for k in REGISTRY]
 COMPUTED_LABEL = "(sätts av databasen)"
 
-ss.setdefault("project", Project())
 ss.setdefault("ver", 0)
 ss.setdefault("result", None)
 ss.setdefault("flash", [])
 ss.setdefault("conn", {"mode": "SQL Server", "server": "localhost", "database": "", "auth": dbio.AUTH_MODES[0], "user": "",
                        "driver": "", "encrypt": True, "trust": True, "url": "", "schemas": ""})
 ss.setdefault("pw", "")
+
+
+def use_project(p: Project, pid: int, digest: str):
+    """Gör projektet till det aktiva i den här fliken."""
+    ss.project, ss.project_id, ss.project_hash = p, pid, digest
+    ss.result = None
+    ss.dg_sel = (None, None)
+    if p.connection:
+        ss.conn.update(p.connection)
+
+
+def import_project(p: Project, note: str):
+    """Läser in ett projekt från fil. Finns ett projekt med samma namn uppdateras det; det gamla innehållet finns kvar i historiken."""
+    match = next((x for x in store.list_projects() if x["name"] == p.name), None)
+    if match:
+        store.save(match["id"], ss.project if ss.get("project_id") == match["id"] else store.load(match["id"])[0], None, "Före inläsning från fil")
+        use_project(p, match["id"], store.save(match["id"], p, None, note))
+    else:
+        use_project(p, *store.create(p, note))
+
+
+def open_last_project():
+    """Öppnar det senast använda projektet i den lokala databasen, eller skapar ett nytt om det inte finns något."""
+    pid = store.last_project_id()
+    loaded = store.load(pid) if pid else None
+    if loaded:
+        use_project(loaded[0], pid, loaded[1])
+    else:
+        use_project(Project(), *store.create(Project()))
+
+
+# projektet hämtas från den lokala databasen, så att arbetet finns kvar när sidan laddas om
+if "project" not in ss and (ss.get("_linked") or not st.query_params.get("projekt")):
+    open_last_project()
+elif "project" in ss and "project_id" not in ss:  # projekt som lagts i sessionen utifrån (t.ex. i tester)
+    ss.project_id, ss.project_hash = store.create(ss.project)
+if not ss.get("_linked"):  # direktlänk: http://localhost:8501/?projekt=projekt/vard.yaml&steg=2
+    ss["_linked"] = True
+    qp = st.query_params
+    if qp.get("projekt"):
+        try:
+            import_project(Project.load(qp["projekt"]), f"Inläst från {qp['projekt']}")
+            ss.project_path = qp["projekt"]
+        except Exception as e:
+            ss.flash.append(("error", f"Kunde inte öppna {qp['projekt']}: {e}"))
+        del st.query_params["projekt"]  # annars skulle en omladdning läsa in filen igen ovanpå ändringarna
+    if qp.get("steg", "").isdigit() and 1 <= int(qp["steg"]) <= len(PAGES):
+        ss.page = PAGES[int(qp["steg"]) - 1]
+if "project" not in ss:  # länken gick inte att öppna
+    open_last_project()
 project: Project = ss.project
 
 
@@ -166,33 +216,93 @@ def conn_label() -> str:
 
 # ---------------------------------------------------------------- sidopanel
 
+def sidebar_projects():
+    projects = store.list_projects()
+    ids = [x["id"] for x in projects]
+    if ss.project_id not in ids:  # borttaget i en annan flik
+        ids.insert(0, ss.project_id)
+    names = {x["id"]: x["name"] for x in projects}
+    picked = st.selectbox("Projekt", ids, index=ids.index(ss.project_id), key=f"proj_pick_{ss.project_id}_{ss.ver}",
+                          format_func=lambda i: names.get(i, project.name) or "(utan namn)",
+                          help="Alla projekt sparas automatiskt i en lokal databas i repot (data/dummyfiller.db).")
+    if picked != ss.project_id:
+        loaded = store.load(picked)
+        if loaded:
+            use_project(loaded[0], picked, loaded[1])
+            changed()
+            st.rerun()
+    project.name = st.text_input("Projektnamn", project.name, key=f"proj_name_{ss.project_id}_{ss.ver}")
+    when = store.versions(ss.project_id, 1)
+    st.caption("✔ Sparas automatiskt" + (f" · senast {when[0]['saved_at'][11:16]}" if when else ""))
+    c1, c2 = st.columns(2)
+    if c1.button("➕ Nytt", width="stretch", help="Skapar ett nytt, tomt projekt. Det nuvarande finns kvar i listan."):
+        p = Project(name=f"Nytt projekt {len(projects) + 1}")
+        use_project(p, *store.create(p))
+        changed()
+        st.rerun()
+    if c2.button("📋 Kopiera", width="stretch", help="Skapar en kopia av projektet att experimentera i."):
+        copy = Project.from_dict(project.to_dict())
+        copy.name = f"{project.name} (kopia)"
+        use_project(copy, *store.create(copy, f"Kopia av {project.name}"))
+        changed()
+        st.rerun()
+    with st.expander("🕓 Historik"):
+        vs = store.versions(ss.project_id)
+        if len(vs) < 2:
+            st.caption("Ingen tidigare version ännu. En ny version sparas när du har arbetat en stund.")
+        else:
+            labels = {v["id"]: f"{v['saved_at'][:16].replace('T', ' ')} · {v['tables']} tabeller" + (f" · {v['note']}" if v["note"] else "") for v in vs}
+            vid = st.selectbox("Version", [v["id"] for v in vs], format_func=labels.get, key=f"ver_pick_{ss.project_id}_{ss.ver}")
+            if st.button("Återställ den här versionen", width="stretch", help="Det nuvarande innehållet sparas först som en egen version, så att du kan ångra."):
+                ss.project_hash = store.save(ss.project_id, project, ss.project_hash, "Före återställning")
+                old = store.load_version(vid)
+                old.name = project.name
+                use_project(old, ss.project_id, store.save(ss.project_id, old, ss.project_hash, f"Återställd från {labels[vid][:16]}"))
+                changed()
+                st.rerun()
+    with st.expander("📁 Fil (YAML)"):
+        default_path = f"projekt/{project.name.strip().replace(' ', '_') or 'projekt'}.yaml"
+        path = st.text_input("Projektfil", ss.get("project_path") or default_path,
+                             help="För att dela projektet med teamet eller versionshantera det i git. Lösenord sparas aldrig.")
+        c1, c2 = st.columns(2)
+        if c1.button("Exportera", width="stretch"):
+            try:
+                project.connection = dict(ss.conn)
+                project.save(path)
+                ss.project_path = path
+                st.success(f"Sparat till {path}")
+            except Exception as e:
+                st.error(f"Kunde inte spara: {e}")
+        if c2.button("Importera", width="stretch", help="Finns ett projekt med samma namn uppdateras det, och det gamla innehållet finns kvar i historiken."):
+            try:
+                import_project(Project.load(path), f"Inläst från {path}")
+                ss.project_path = path
+                changed()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Kunde inte öppna: {e}")
+    with st.expander("🗑️ Ta bort projektet"):
+        st.caption("Projektet försvinner ur listan. Innehållet och historiken finns kvar i databasen.")
+        if st.checkbox("Jag vill ta bort projektet", key=f"del_ok_{ss.project_id}") and st.button("Ta bort", width="stretch"):
+            store.delete(ss.project_id)
+            rest = store.last_project_id()
+            loaded = store.load(rest) if rest else None
+            if loaded:
+                use_project(loaded[0], rest, loaded[1])
+            else:
+                use_project(Project(), *store.create(Project()))
+            changed()
+            st.rerun()
+
+
 with st.sidebar:
     st.title("🧪 Dummyfiller")
     st.caption("Verklighetstrogen dummy-data utifrån dina scheman. Allt körs lokalt – ingen data hämtas från internet.")
     page = st.radio("Steg", PAGES, key="page")
+    if st.query_params.get("steg") != str(PAGES.index(page) + 1):  # adressen visar steget, så att en omladdning stannar kvar
+        st.query_params["steg"] = str(PAGES.index(page) + 1)
     st.divider()
-    project.name = st.text_input("Projektnamn", project.name)
-    default_path = f"projekt/{project.name.strip().replace(' ', '_') or 'projekt'}.yaml"
-    path = st.text_input("Projektfil", ss.get("project_path") or default_path, help="Projektet (schema, kategorier, generatorer, värdelistor) sparas som YAML och kan versionshanteras. Lösenord sparas aldrig.")
-    c1, c2 = st.columns(2)
-    if c1.button("Spara", width="stretch"):
-        try:
-            project.connection = dict(ss.conn)
-            project.save(path)
-            ss.project_path = path
-            st.success(f"Sparat till {path}")
-        except Exception as e:
-            st.error(f"Kunde inte spara: {e}")
-    if c2.button("Öppna", width="stretch"):
-        try:
-            ss.project = Project.load(path)
-            ss.project_path = path
-            if ss.project.connection:
-                ss.conn.update(ss.project.connection)
-            changed()
-            st.rerun()
-        except Exception as e:
-            st.error(f"Kunde inte öppna: {e}")
+    sidebar_projects()
     st.divider()
     included = [t for t in project.tables if t.include]
     st.metric("Tabeller som genereras", f"{len(included)} av {len(project.tables)}")
@@ -243,7 +353,7 @@ def page_source():
                 with st.spinner("Läser schema …"):
                     tables = dbio.reflect(get_engine(), schemas)
                 added, updated = add_tables(tables)
-                flash("success", f"Schemat är inläst: {added} nya tabeller, {updated} uppdaterade. Gå vidare till steg 2.")
+                flash("success", f"Schemat är inläst: {added} nya tabeller, {updated} uppdaterade. Gå vidare till steg 2 för att se dem i diagrammet.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Kunde inte läsa schemat: {e}")
@@ -253,13 +363,18 @@ def page_source():
         files = st.file_uploader("SQL-filer", type=["sql", "txt", "ddl"], accept_multiple_files=True)
         pasted = st.text_area("… eller klistra in DDL", height=180)
         schema = st.text_input("Standardschema (för tabeller utan schema)", "dbo")
-        b1, b2, _ = st.columns([1, 1.4, 3])
+        b1, _ = st.columns([1, 4])
         sql = None
         if b1.button("Läs in DDL", type="primary"):
             sql = "\nGO\n".join([valuelists.decode(f.getvalue()) for f in files or []] + [pasted])
-        example = ROOT / "exempel" / "vard.sql"
-        if example.exists() and b2.button("Läs in exempelschema (vård)"):
-            sql = example.read_text(encoding="utf-8")
+        examples = {"Vård": "vard.sql", "Ekonomi (kodplan, leverantörsfakturor, budget)": "ekonomi.sql",
+                    "Personal (anställda, frånvaro, lön)": "personal.sql", "Tandvård": "tandvard.sql"}
+        examples = {k: ROOT / "exempel" / v for k, v in examples.items() if (ROOT / "exempel" / v).exists()}
+        if examples:
+            st.divider()
+            ex = st.selectbox("Exempelscheman att prova med", list(examples), key="example_pick")
+            if st.button("Läs in exempelschema"):
+                sql = examples[ex].read_text(encoding="utf-8")
         if sql is not None:
             tables, warns = parse_ddl(sql, schema or "dbo")
             if not tables:
@@ -268,16 +383,383 @@ def page_source():
                 added, updated = add_tables(tables)
                 for w in warns:
                     flash("warning", w)
-                flash("success", f"DDL inläst: {added} nya tabeller, {updated} uppdaterade. Gå vidare till steg 2.")
+                flash("success", f"DDL inläst: {added} nya tabeller, {updated} uppdaterade. Gå vidare till steg 2 för att se dem i diagrammet.")
                 st.rerun()
 
     with tab_manual:
-        st.write("Du behöver inget schema för att komma igång. Under **2. Tabeller och relationer** kan du skapa egna tabeller "
-                 "och relationer, och under **3. Kolumner** lägger du till kolumner – både i egna tabeller och som komplettering "
+        st.write("Du behöver inget schema för att komma igång. Under **2. Diagram** skapar du tabeller, kolumner och relationer "
+                 "direkt i ett tabelldiagram – både egna tabeller och som komplettering "
                  "till inlästa. Egna tabeller kan skapas i databasen vid laddning eller exporteras till fil.")
 
 
-# ---------------------------------------------------------------- 2. Tabeller och relationer
+# ---------------------------------------------------------------- 2. Diagram
+
+_diagram = components.declare_component("dummyfiller_diagram", path=str(Path(__file__).resolve().parent / "diagram"))
+TYPE_CHOICES = ["int", "bigint", "smallint", "tinyint", "bit", "decimal(18,2)", "decimal(10,2)", "nvarchar(50)", "nvarchar(100)",
+                "nvarchar(200)", "nvarchar(max)", "varchar(20)", "char(13)", "date", "datetime2(0)", "time", "uniqueidentifier"]
+
+
+def dg_select(table: str | None, column: str | None = None, add: bool = False):
+    """Väljer tabell/kolumn i diagrammet från Python (diagrammet följer med via selNonce)."""
+    ss.dg_sel = (table, column)
+    ss.dg_add = table if add else None
+    ss.dg_nonce = ss.get("dg_nonce", 0) + 1
+
+
+def diagram_args(show_suggestions: bool, maximized: bool = False) -> dict:
+    tables = []
+    for t in project.tables:
+        cols = []
+        for c in t.columns:
+            fk = t.fk_for(c.name)
+            parent = project.table(fk.ref_table) if fk else None
+            if c.computed:
+                gen = "sätts av databasen"
+            elif parent is not None:
+                gen = "→ " + parent.name
+            else:
+                gen = REGISTRY[c.generator].label if c.generator in REGISTRY else ""
+            cols.append({"name": c.name, "type": c.type_raw, "pk": c.name in t.primary_key, "fk": fk is not None,
+                         "unique": any(c.name in u for u in t.uniques), "nullable": c.nullable, "gen": gen,
+                         "low": c.confidence == "låg" and not c.manual and parent is None and not c.computed})
+        cat = CATEGORIES.get(t.category, CATEGORIES["other"]).split(" (")[0]
+        tables.append({"key": t.key, "name": t.name, "category": t.category, "include": t.include, "x": t.pos[0], "y": t.pos[1],
+                       "rowsLabel": f"{estimated_rows(project, t):,} rader".replace(",", " "),
+                       "sub": f"{cat}{' · ' + t.schema if t.schema else ''}{' · historik' if (t.history or {}).get('enabled') else ''}",
+                       "columns": cols})
+    keys = {t.key for t in project.tables}
+    relations = []
+    for t in project.tables:
+        for fk in t.foreign_keys:
+            if fk.ref_table in keys:
+                label = f"{fk.per_parent_min}–{fk.per_parent_max} per förälder" if fk.per_parent_max else ""
+                relations.append({"from": t.key, "fromCols": fk.columns, "to": fk.ref_table, "toCols": fk.ref_columns,
+                                  "manual": fk.source == "manual", "label": label})
+    sugg = [{"from": a, "col": b, "to": c, "toCol": d} for a, b, c, d in suggest_relations(project)] if show_suggestions else []
+    sel = ss.get("dg_sel") or (None, None)
+    cats = list(dict.fromkeys(t.category for t in project.tables))
+    return {"tables": tables, "relations": relations, "suggestions": sugg, "selected": {"table": sel[0], "column": sel[1]},
+            "selNonce": ss.get("dg_nonce", 0), "layoutNonce": ss.get("dg_layout", 0), "height": 680,
+            "maximized": maximized, "fill": maximized,
+            "legend": [[c, CATEGORIES.get(c, c).split(" (")[0].split(" / ")[0]] for c in cats][:6]}
+
+
+def add_relation(a_key: str, a_col: str, b_key: str, b_col: str, flip: bool = True):
+    level, msg, fk = edit.connect(project, a_key, a_col, b_key, b_col, flip)
+    flash(level, msg)
+    if fk is not None and level != "info":
+        child = next(t for t in project.tables if fk in t.foreign_keys)
+        infer_table(child, project)
+        default_fk_settings(child, project)
+        changed()
+        dg_select(child.key, fk.columns[0])
+
+
+def handle_diagram_event(ev: dict):
+    kind = ev.get("type")
+    if kind == "select":
+        ss.dg_sel, ss.dg_add = (ev.get("table"), ev.get("column")), None
+    elif kind == "move":
+        for key, xy in (ev.get("positions") or {}).items():
+            t = project.table(key)
+            if t is not None and len(xy) == 2:
+                t.pos = [float(xy[0]), float(xy[1])]
+    elif kind == "connect":
+        add_relation(ev["from"], ev["col"], ev["to"], ev["toCol"])
+    elif kind == "accept":
+        add_relation(ev["from"], ev["col"], ev["to"], ev["toCol"], flip=False)
+    elif kind == "maximize":
+        ss.dg_max = bool(ev.get("on"))
+    elif kind == "add_column":
+        ss.dg_sel, ss.dg_add = (ev.get("table"), None), ev.get("table")
+
+
+def generator_settings(t: Table, col: Column):
+    """Generator, parametrar och andel NULL för en kolumn. Ändringar gäller direkt."""
+    labels = GEN_LABELS
+    cur_label = label_of(col.generator) if col.generator in REGISTRY else labels[0]
+    picked = st.selectbox("Generator", labels, index=labels.index(cur_label), key=f"gen_{t.key}_{col.name}_{ss.ver}",
+                          help="Skriv i rutan för att söka, t.ex. 'datum', 'konto' eller 'diagnos'.")
+    if LABEL_TO_KEY[picked] != col.generator:
+        set_generator(t, col, LABEL_TO_KEY[picked])
+        changed()
+        st.rerun()
+    spec = REGISTRY[col.generator]
+    if spec.help:
+        st.caption(spec.help)
+    new_params = param_widgets(t, col)
+    if new_params != {**defaults(col.generator), **(col.params or {})}:
+        col.params, col.manual, col.confidence = new_params, True, ""
+        ss.result = None
+        st.rerun()
+    if col.nullable and col.name not in t.primary_key:
+        np_ = st.slider("Andel NULL %", 0, 100, int(col.null_pct), 5, key=f"null_{t.key}_{col.name}_{ss.ver}")
+        if np_ != int(col.null_pct):
+            col.null_pct = float(np_)
+            ss.result = None
+            st.rerun()
+    if col.manual and st.button("↩️ Återställ till automatiskt förslag"):
+        col.generator, col.params, col.confidence, col.null_pct = infer_column(col, t, project)
+        col.manual = False
+        changed()
+        st.rerun()
+
+
+def new_table_form(key: str):
+    with st.form(key, clear_on_submit=True):
+        x, y = st.columns([1, 2])
+        schema = x.text_input("Schema", "dbo")
+        name = y.text_input("Tabellnamn")
+        cat = st.selectbox("Kategori", ["Automatiskt utifrån namnet"] + CAT_LABELS)
+        add_id = st.checkbox("Lägg till ID-kolumn (int, primärnyckel)", True)
+        if st.form_submit_button("Skapa tabell", type="primary"):
+            name = name.strip()
+            if not name:
+                st.error("Ange ett tabellnamn.")
+            elif project.table(f"{schema.strip()}.{name}" if schema.strip() else name):
+                st.error("Tabellen finns redan.")
+            else:
+                t = Table(name=name, schema=schema.strip(), custom=True)
+                if add_id:
+                    t.columns.append(Column.from_type(f"{name}ID", "int", nullable=False, identity=True, custom=True))
+                    t.primary_key = [f"{name}ID"]
+                if cat in CAT_BY_LABEL:
+                    t.category, t.category_manual = CAT_BY_LABEL[cat], True
+                project.tables.append(t)
+                infer_table(t, project, set_rows=True)
+                select("cur_table", t.key)
+                dg_select(t.key, None, add=True)
+                changed()
+                st.rerun()
+
+
+def add_column_form(t: Table):
+    with st.form(f"dg_addcol_{t.key}", clear_on_submit=True):
+        name = st.text_input("Kolumnnamn", help="Namnet styr förslaget på innehåll, t.ex. Fornamn, Kontonr, Fakturadatum eller Diagnoskod.")
+        typ = st.selectbox("Datatyp", TYPE_CHOICES, index=TYPE_CHOICES.index("nvarchar(100)"), accept_new_options=True,
+                           help="Välj i listan eller skriv en egen, t.ex. decimal(12,4).")
+        a, b = st.columns(2)
+        nullable = a.checkbox("Tillåt NULL", True)
+        in_pk = b.checkbox("Primärnyckel", False)
+        if st.form_submit_button("Lägg till kolumn", type="primary"):
+            name = name.strip()
+            col = Column.from_type(name, str(typ).strip() or "nvarchar(100)", nullable=nullable and not in_pk, custom=True) if name else None
+            if col is None or t.column(name):
+                st.error("Ange ett kolumnnamn som inte redan finns.")
+            elif col.kind == "other":
+                st.error(f"Okänd datatyp: {typ}")
+            else:
+                t.columns.append(col)
+                if in_pk:
+                    t.primary_key.append(name)
+                col.generator, col.params, col.confidence, col.null_pct = infer_column(col, t, project)
+                changed()
+                dg_select(t.key, name, add=True)
+                st.rerun()
+
+
+def panel_table(t: Table):
+    st.subheader(t.name)
+    st.caption(f"{CATEGORIES.get(t.category, '')} · {len(t.columns)} kolumner · {'egen tabell' if t.custom else 'från schema'}")
+    with st.expander("➕ Lägg till kolumn", expanded=ss.get("dg_add") == t.key or not t.columns):
+        add_column_form(t)
+    with st.form(f"dg_table_{t.key}_{ss.ver}"):
+        a, b = st.columns([1, 2])
+        schema = a.text_input("Schema", t.schema)
+        name = b.text_input("Tabellnamn", t.name)
+        cat = st.selectbox("Kategori", CAT_LABELS, index=CAT_LABELS.index(CATEGORIES.get(t.category, CATEGORIES["other"])),
+                           help="Styr hur kolumnerna tolkas. Kolumner som du inte har anpassat själv får nya förslag när kategorin ändras.")
+        rows = st.number_input("Antal rader", 0, 10_000_000, int(t.rows), help="Antal unika om tabellen har historik. Styrs av föräldern om en relation har 'barn per förälder'.")
+        include = st.checkbox("Ta med vid generering", t.include)
+        if st.form_submit_button("Spara tabellen"):
+            try:
+                if name.strip():
+                    old = t.key
+                    edit.rename_table(project, t, name.strip(), schema.strip())
+                    if t.key != old:
+                        dg_select(t.key, None)
+                        select("cur_table", t.key)
+                t.rows, t.include = int(rows), include
+                if CAT_BY_LABEL[cat] != t.category:
+                    t.category, t.category_manual = CAT_BY_LABEL[cat], True
+                    infer_table(t, project)
+                    t.rows = default_rows(t, project)
+                changed()
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+    with st.expander("🕓 Historik (SCD2)" + (" – på" if (t.history or {}).get("enabled") else "")):
+        history_form(t)
+    with st.expander("🗑️ Ta bort tabellen"):
+        st.caption("Tabellen tas bort ur projektet tillsammans med relationer till och från den. Databasen påverkas inte.")
+        if st.button("Ta bort ur projektet", key=f"dg_del_{t.key}"):
+            project.remove_table(t.key)
+            dg_select(None)
+            changed()
+            st.rerun()
+
+
+def panel_relation(t: Table, fk: ForeignKey):
+    k = f"{t.key}_{fk.columns[0]}_{ss.ver}"
+    st.markdown(f"**Relation** → {fk.ref_table} ({', '.join(fk.ref_columns)})")
+    dist = st.selectbox("Fördelning över föräldrar", DIST_LABELS, index=DIST_LABELS.index(DISTRIBUTIONS.get(fk.distribution, DIST_LABELS[0])), key=f"dg_dist_{k}")
+    a, b = st.columns(2)
+    pmin = int(a.number_input("Barn per förälder, minst", 0, 1000, int(fk.per_parent_min), key=f"dg_pmin_{k}"))
+    pmax = int(b.number_input("… högst", 0, 1000, int(fk.per_parent_max), key=f"dg_pmax_{k}",
+                              help="Större än 0: varje förälder får så här många barnrader och tabellens radantal följer av föräldern. 0 = använd tabellens radantal."))
+    nullable = all((c := t.column(n)) is not None and c.nullable for n in fk.columns)
+    null_pct = float(st.slider("Andel utan förälder (NULL) %", 0, 100, int(fk.null_pct), 5, key=f"dg_fknull_{k}", disabled=not nullable))
+    guided = st.checkbox("Välj förälder utifrån kolumnens generator", fk.guided, key=f"dg_guided_{k}",
+                         help="För kodkolumner: föräldern väljs så att t.ex. diagnosen passar patienten eller kontot passar fakturan.")
+    new = (DIST_BY_LABEL[dist], pmin, pmax, null_pct, guided)
+    if new != (fk.distribution, fk.per_parent_min, fk.per_parent_max, fk.null_pct, fk.guided):
+        fk.distribution, fk.per_parent_min, fk.per_parent_max, fk.null_pct, fk.guided = new
+        changed()
+        st.rerun()
+    if st.button("Ta bort relationen", key=f"dg_delrel_{k}"):
+        t.foreign_keys.remove(fk)
+        infer_table(t, project)
+        changed()
+        st.rerun()
+
+
+def panel_column(t: Table, col: Column):
+    st.subheader(f"{t.name}.{col.name}")
+    st.caption(" · ".join(x for x in (col.type_raw + ("" if col.nullable else " NOT NULL"), key_label(t, col)) if x))
+    fk = t.fk_for(col.name)
+    has_parent = fk is not None and project.table(fk.ref_table) is not None
+    if col.computed:
+        st.info("Kolumnen sätts av databasen (beräknad kolumn eller rowversion) och genereras inte.")
+    else:
+        if has_parent:
+            panel_relation(t, fk)
+        if not has_parent or fk.guided:
+            if has_parent:
+                st.divider()
+            generator_settings(t, col)
+    with st.expander("✏️ Namn och datatyp"):
+        with st.form(f"dg_col_{t.key}_{col.name}_{ss.ver}"):
+            name = st.text_input("Kolumnnamn", col.name)
+            opts = TYPE_CHOICES if col.type_raw in TYPE_CHOICES else [col.type_raw] + TYPE_CHOICES
+            typ = st.selectbox("Datatyp", opts, index=opts.index(col.type_raw), accept_new_options=True)
+            a, b = st.columns(2)
+            nullable = a.checkbox("Tillåt NULL", col.nullable)
+            in_pk = b.checkbox("Primärnyckel", col.name in t.primary_key)
+            if st.form_submit_button("Spara kolumnen"):
+                try:
+                    new_name = name.strip() or col.name
+                    edit.rename_column(project, t, col.name, new_name)
+                    if str(typ).strip() and str(typ).strip() != col.type_raw:
+                        info = parse_type(str(typ).strip())
+                        if info["kind"] == "other":
+                            raise ValueError(f"Okänd datatyp: {typ}")
+                        col.type_raw, col.kind, col.length, col.precision, col.scale = str(typ).strip(), info["kind"], info["length"], info["precision"], info["scale"]
+                    if in_pk and col.name not in t.primary_key:
+                        t.primary_key.append(col.name)
+                    elif not in_pk and col.name in t.primary_key:
+                        t.primary_key.remove(col.name)
+                    col.nullable = nullable and not in_pk
+                    if not col.manual:  # nytt namn eller ny typ kan ge ett bättre förslag
+                        col.generator, col.params, col.confidence, col.null_pct = infer_column(col, t, project)
+                    changed()
+                    dg_select(t.key, col.name)
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+    if st.button("🗑️ Ta bort kolumnen", key=f"dg_delcol_{t.key}_{col.name}"):
+        edit.delete_column(project, t, col.name)
+        dg_select(t.key, None)
+        changed()
+        st.rerun()
+
+
+MAX_CSS = """<style>
+section[data-testid="stSidebar"], [data-testid="stExpandSidebarButton"], header[data-testid="stHeader"] { display: none !important; }
+[data-testid="stMainBlockContainer"] { padding: .6rem 1rem 1rem !important; max-width: 100% !important; }
+[data-testid="stColumn"]:has(.dg-panel) { position: sticky; top: .6rem; align-self: flex-start; max-height: calc(100vh - 1.2rem);
+    overflow-y: auto; padding-right: .4rem; }
+</style>"""
+
+
+def page_diagram():
+    ss.setdefault("dg_max", False)
+    ss.setdefault("dg_sel", (None, None))
+    ss.setdefault("dg_seq", None)
+    ss.setdefault("dg_add", None)
+    pending = ss.get("diagram_cmp")  # händelsen som startade den här körningen
+    if isinstance(pending, dict) and pending.get("seq") != ss.dg_seq:
+        ss.dg_seq = pending.get("seq")
+        handle_diagram_event(pending)
+    maxed = bool(ss.dg_max)
+    if maxed:  # maximerat: dölj sidomeny, sidhuvud och rubrik och använd hela fönstret
+        st.html(MAX_CSS)
+    else:
+        st.header("2. Diagram – tabeller, kolumner och relationer")
+    for kind, text in ss.flash:  # meddelanden från händelsen (t.ex. "Relation skapad") visas direkt
+        getattr(st, kind)(text)
+    ss.flash = []
+    edit.auto_layout(project)
+
+    a, b, c, d = st.columns([1.5, 1.2, 1.1, 3])
+    n_sugg = len(suggest_relations(project)) if project.tables else 0
+    show = a.toggle(f"Visa förslag på relationer ({n_sugg})", key="dg_show_sugg", disabled=not n_sugg,
+                    help="Förslag utifrån kolumnnamn, t.ex. PatientID → Patient. Visas som streckade pilar; klicka på plustecknet för att lägga till.")
+    if b.button("Ordna automatiskt", help="Placerar om alla tabeller: föräldrar till vänster, barn till höger."):
+        edit.auto_layout(project, only_missing=False)
+        ss.dg_layout = ss.get("dg_layout", 0) + 1
+    with c.popover("➕ Ny tabell"):
+        new_table_form("dg_new_table")
+    if maxed:
+        d.caption("Maximerat läge · Esc eller ✕ i diagrammet går tillbaka")
+
+    left, right = st.columns([3.6, 1] if maxed else [2.7, 1], gap="medium")
+    with left:
+        ev = _diagram(**diagram_args(bool(show) and n_sugg > 0, maxed), key="diagram_cmp", default=None)
+        if isinstance(ev, dict) and ev.get("seq") != ss.dg_seq:  # reserv om händelsen inte fanns i sessionen vid start
+            ss.dg_seq = ev.get("seq")
+            handle_diagram_event(ev)
+            st.rerun()
+    tkey, cname = ss.dg_sel
+    t = project.table(tkey) if tkey else None
+    col = t.column(cname) if t is not None and cname else None
+    with right:
+        if maxed:
+            st.html('<span class="dg-panel"></span>')  # panelen följer med när sidan rullas
+        if t is None:
+            st.subheader("Så här gör du")
+            st.markdown(
+                "- **Klicka** på en tabell eller kolumn för att redigera den här i panelen.\n"
+                "- **Dra i rubriken** för att flytta en tabell. Placeringen sparas i projektet.\n"
+                "- **Dra från pricken** till höger om en kolumn till en kolumn i en annan tabell för att skapa en relation. "
+                "Pilen pekar på föräldern, och dras den från en nyckel vänds den automatiskt.\n"
+                "- **Klicka på en pil** för att ändra eller ta bort relationen.\n"
+                "- **⛶ Maximera** i diagrammets verktygsrad låter diagrammet fylla hela fönstret.\n"
+                "- Kolumner märkta ⚠ är gissningar som är värda att titta på.")
+            if show and n_sugg and st.button(f"Lägg till alla {n_sugg} föreslagna relationer", type="primary"):
+                for s in suggest_relations(project):
+                    add_relation(*s, flip=False)
+                dg_select(None)
+                st.rerun()
+            if not project.tables:
+                st.info("Inga tabeller ännu. Skapa en med **➕ Ny tabell** eller läs in ett schema under steg 1.")
+        elif col is None:
+            panel_table(t)
+        else:
+            panel_column(t, col)
+    if t is not None and t.columns:
+        with left:
+            st.caption(f"Förhandsgranskning av {t.key}")
+            try:
+                res = generate(project, only=[t.key], max_rows=8)
+                st.dataframe(to_df(res.data[t.key]), hide_index=True, width="stretch")
+                for w in res.warnings:
+                    if w.startswith(t.key):
+                        st.warning(w)
+            except Exception as e:
+                st.error(f"Förhandsgranskningen misslyckades: {e}")
+
+
+# ---------------------------------------------------------------- 3. Tabeller och relationer
 
 def fk_rows() -> list[tuple[Table, ForeignKey]]:
     return [(t, fk) for t in project.tables for fk in t.foreign_keys]
@@ -302,7 +784,7 @@ def diagram_dot() -> str:
 
 
 def page_tables():
-    st.header("2. Tabeller och relationer")
+    st.header("3. Tabeller och relationer")
     # --- ta emot redigeringar innan tabellerna ritas om
     dirty = False
     for idx, change in take_edits("tables").items():
@@ -351,7 +833,7 @@ def page_tables():
             "Kategori": st.column_config.SelectboxColumn(options=CAT_LABELS, required=True, width="medium"),
             "Rader": st.column_config.NumberColumn(min_value=0, step=1, help="Antal rader som ska genereras (antal unika om tabellen har historik)."),
             "Blir ungefär": st.column_config.NumberColumn(help="Faktiskt radantal när 'barn per förälder' eller historik (SCD2) styr."),
-            "Osäkra kolumner": st.column_config.NumberColumn(help="Kolumner där den automatiska tolkningen är en gissning – titta på dem under steg 3."),
+            "Osäkra kolumner": st.column_config.NumberColumn(help="Kolumner där den automatiska tolkningen är en gissning – titta på dem under steg 4."),
         })
         order, broken = load_order(project, [t.key for t in project.tables if t.include])
         st.caption("Laddordning (föräldrar före barn): " + " → ".join(order))
@@ -386,7 +868,7 @@ def page_tables():
                     infer_table(t, project, set_rows=True)
                     select("cur_table", t.key)
                     changed()
-                    flash("success", f"Tabellen {t.key} är skapad. Lägg till kolumner under steg 3.")
+                    flash("success", f"Tabellen {t.key} är skapad. Lägg till kolumner under steg 4.")
                     st.rerun()
     with b.expander("🗑️ Ta bort tabell"):
         if project.tables:
@@ -410,7 +892,7 @@ def page_tables():
             "Fördelning": st.column_config.SelectboxColumn(options=DIST_LABELS, required=True, width="large"),
             "Andel NULL %": st.column_config.NumberColumn(min_value=0, max_value=100, step=5, help="Gäller bara om FK-kolumnen tillåter NULL."),
             "Barn per förälder, minst": st.column_config.NumberColumn(min_value=0, step=1),
-            "Barn per förälder, högst": st.column_config.NumberColumn(min_value=0, step=1, help="Större än 0: varje förälder får så här många barnrader, och tabellens radantal följer av föräldern (t.ex. 1–5 orderrader per order). 0 = använd tabellens radantal och fördelningen."),
+            "Barn per förälder, högst": st.column_config.NumberColumn(min_value=0, step=1, help="Större än 0: varje förälder får så här många barnrader, och tabellens radantal följer av föräldern (t.ex. 1–5 fakturarader per faktura). 0 = använd tabellens radantal och fördelningen."),
             "Styrd": st.column_config.CheckboxColumn(help="Föräldern väljs utifrån värdet som kolumnens egen generator ger. Används för kodkolumner, så att t.ex. diagnosen passar patienten och vårdkontakten."),
         })
     else:
@@ -448,7 +930,7 @@ def page_tables():
             st.rerun()
 
 
-# ---------------------------------------------------------------- 3. Kolumner
+# ---------------------------------------------------------------- 4. Kolumner
 
 def key_label(t: Table, c: Column) -> str:
     parts = []
@@ -511,7 +993,7 @@ def param_widgets(t: Table, col: Column) -> dict:
             opts = list(project.value_lists) or [""]
             out[p.name] = st.selectbox(p.label, opts, index=opts.index(v) if v in opts else 0, key=k, help=h)
             if not project.value_lists:
-                st.caption("Inga värdelistor inlästa ännu – gör det under steg 4.")
+                st.caption("Inga värdelistor inlästa ännu – gör det under steg 5.")
         else:
             out[p.name] = st.text_input(p.label, str(v), key=k, help=h)
     return out
@@ -547,9 +1029,9 @@ def history_form(t: Table):
 
 
 def page_columns():
-    st.header("3. Kolumner – vad ska varje kolumn innehålla?")
+    st.header("4. Kolumner – vad ska varje kolumn innehålla?")
     if not project.tables:
-        st.info("Inga tabeller ännu. Börja med steg 1 eller skapa en tabell under steg 2.")
+        st.info("Inga tabeller ännu. Börja med steg 1 eller skapa en tabell under steg 3.")
         return
     keys = [t.key for t in project.tables]
     t = project.table(pick("Tabell", keys, "cur_table"))
@@ -597,34 +1079,9 @@ def page_columns():
             fk = t.fk_for(col.name)
             if fk and project.table(fk.ref_table) is not None:
                 st.info(f"Kolumnen är en främmande nyckel och får värden från **{fk.ref_table}** ({', '.join(fk.ref_columns)}). "
-                        "Fördelning och andel NULL ställer du in under steg 2 → Relationer.")
+                        "Fördelning och andel NULL ställer du in under steg 3 → Relationer.")
             else:
-                labels = GEN_LABELS
-                cur_label = label_of(col.generator) if col.generator in REGISTRY else labels[0]
-                picked = st.selectbox("Generator", labels, index=labels.index(cur_label), key=f"gen_{t.key}_{col.name}_{ss.ver}")
-                if LABEL_TO_KEY[picked] != col.generator:
-                    set_generator(t, col, LABEL_TO_KEY[picked])
-                    changed()
-                    st.rerun()
-                spec = REGISTRY[col.generator]
-                if spec.help:
-                    st.caption(spec.help)
-                new_params = param_widgets(t, col)
-                if new_params != {**defaults(col.generator), **(col.params or {})}:
-                    col.params, col.manual, col.confidence = new_params, True, ""
-                    ss.result = None
-                    st.rerun()
-                if col.nullable and col.name not in t.primary_key:
-                    np_ = st.slider("Andel NULL %", 0, 100, int(col.null_pct), 5, key=f"null_{t.key}_{col.name}_{ss.ver}")
-                    if np_ != int(col.null_pct):
-                        col.null_pct = float(np_)
-                        ss.result = None
-                        st.rerun()
-                if col.manual and st.button("↩️ Återställ till automatiskt förslag"):
-                    col.generator, col.params, col.confidence, col.null_pct = infer_column(col, t, project)
-                    col.manual = False
-                    changed()
-                    st.rerun()
+                generator_settings(t, col)
     with right:
         st.subheader("Förhandsgranskning")
         try:
@@ -664,10 +1121,7 @@ def page_columns():
             victim = st.selectbox("Kolumn", [c.name for c in t.columns], key=f"del_col_{t.key}")
             st.caption("Kolumnen tas bort ur projektet (inte ur databasen). NOT NULL-kolumner utan standardvärde behöver finnas kvar för att laddningen ska fungera.")
             if st.button("Ta bort kolumnen"):
-                t.columns = [c for c in t.columns if c.name != victim]
-                t.primary_key = [c for c in t.primary_key if c != victim]
-                t.uniques = [u for u in t.uniques if victim not in u]
-                t.foreign_keys = [fk for fk in t.foreign_keys if victim not in fk.columns]
+                edit.delete_column(project, t, victim)
                 changed()
                 st.rerun()
     with c3.expander("🔑 Primärnyckel"):
@@ -697,7 +1151,7 @@ def page_columns():
                 st.success(f"Regeln är sparad i {rules.rules_path()} och används när scheman läses in framöver.")
 
 
-# ---------------------------------------------------------------- 4. Värdelistor
+# ---------------------------------------------------------------- 5. Värdelistor
 
 CODEBOOKS = {"Diagnoser (ICD-10-SE)": ("diagnosis", care.DIAGNOSES), "Åtgärder (KVÅ)": ("procedure", care.PROCEDURES),
              "Läkemedel (ATC)": ("drug", care.DRUGS)}
@@ -858,7 +1312,7 @@ def tab_profile():
 
 def tab_rules():
     st.write("Egna regler säger hur kolumner med ett visst namn alltid ska genereras, och gäller i alla projekt. De prövas före de "
-             "inbyggda tolkningsreglerna när ett schema läses in. Nya regler skapar du under steg 3 → 'Spara kolumnens inställning som regel'.")
+             "inbyggda tolkningsreglerna när ett schema läses in. Nya regler skapar du under steg 4 → 'Spara kolumnens inställning som regel'.")
     st.caption(f"Reglerna sparas i `{rules.rules_path()}`. Filen kan delas i teamet; peka ut en gemensam fil med miljövariabeln DUMMYFILLER_RULES.")
     rs = rules.load_rules()
     if not rs:
@@ -881,7 +1335,7 @@ def tab_rules():
 
 
 def page_lists():
-    st.header("4. Värdelistor – styr datan med egna exempel")
+    st.header("5. Värdelistor – styr datan med egna exempel")
     t1, t2, t3, t4 = st.tabs(["Värdelistor", "Kodverk (vård)", "Profil från produktion", "Egna regler"])
     with t1:
         tab_value_lists()
@@ -893,14 +1347,14 @@ def page_lists():
         tab_rules()
 
 
-# ---------------------------------------------------------------- 5. Generera
+# ---------------------------------------------------------------- 6. Generera
 
 LOCALES = ["sv_SE", "en_US", "en_GB", "nb_NO", "da_DK", "fi_FI", "de_DE"]
 MODES = ["Ny datamängd", "Lägg till ny data ovanpå befintlig (inkrementellt)"]
 
 
 def page_generate():
-    st.header("5. Generera och skriv ut")
+    st.header("6. Generera och skriv ut")
     included = [t for t in project.tables if t.include]
     if not included:
         st.info("Det finns inga tabeller att generera.")
@@ -1065,4 +1519,14 @@ def page_generate():
             st.success(f"Skriptet är skrivet till {out.resolve()}")
 
 
-{PAGES[0]: page_source, PAGES[1]: page_tables, PAGES[2]: page_columns, PAGES[3]: page_lists, PAGES[4]: page_generate}[page]()
+{PAGES[0]: page_source, PAGES[1]: page_diagram, PAGES[2]: page_tables, PAGES[3]: page_columns, PAGES[4]: page_lists,
+ PAGES[5]: page_generate}[page]()
+
+# automatisk sparning: körs efter varje ändring (en körning som avbryts av st.rerun sparas av körningen som följer)
+ss.project.connection = dict(ss.conn)  # utan lösenord – det ligger bara i sessionen
+try:
+    ss.project_hash = store.save(ss.project_id, ss.project, ss.project_hash)
+except KeyError:  # projektet har tagits bort i en annan flik: spara som nytt
+    ss.project_id, ss.project_hash = store.create(ss.project, "Återskapat")
+except Exception as e:
+    st.sidebar.error(f"Kunde inte spara automatiskt: {e}")

@@ -8,13 +8,12 @@ from pathlib import Path
 import yaml
 
 CATEGORIES = {
-    "person": "Person (kund, anställd, medlem …)",
-    "company": "Företag / organisation",
-    "product": "Produkt / artikel",
-    "transaction": "Transaktion (order, faktura, händelse …)",
+    "person": "Person (patient, anställd, invånare …)",
+    "company": "Leverantör / organisation",
+    "transaction": "Händelse / transaktion (vårdkontakt, faktura, budgetpost, frånvaro …)",
     "calendar": "Kalender / datumdimension",
-    "location": "Plats / adress",
-    "reference": "Referens / kodtabell",
+    "location": "Enhet / plats (vårdenhet, klinik, adress …)",
+    "reference": "Referens / kodtabell (konto, ansvar, diagnos, befattning …)",
     "bridge": "Kopplingstabell (många-till-många)",
     "other": "Övrigt",
 }
@@ -141,6 +140,7 @@ class Table:
     custom: bool = False
     checks: list[str] = field(default_factory=list)  # CHECK-villkor enligt schemat
     history: dict = field(default_factory=dict)  # SCD2-inställningar, se engine
+    pos: list = field(default_factory=list)  # [x, y] i diagrammet
 
     @property
     def key(self) -> str:
@@ -217,6 +217,7 @@ def merge_tables(project: Project, new_tables: list[Table]) -> tuple[int, int]:
         new.rows, new.include = old.rows, old.include
         if old.history:
             new.history = old.history
+        new.pos = old.pos
         if old.category_manual:
             new.category, new.category_manual = old.category, True
         for col in new.columns:

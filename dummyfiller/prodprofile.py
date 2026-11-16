@@ -30,7 +30,7 @@ def build_profile_sql(project: Project, max_distinct: int = 50, min_count: int =
     out = [
         "-- Profil för dummyfiller. Returnerar endast aggregat, inga enskilda rader.",
         f"-- Värden som förekommer färre än {min_count} gånger utelämnas. Identifierande kolumner och fritext ingår inte.",
-        "-- Kör skriptet, spara resultatet som CSV (med rubriker) och läs in filen under steg 4 → Profil från produktion.",
+        "-- Kör skriptet, spara resultatet som CSV (med rubriker) och läs in filen under steg 5 → Profil från produktion.",
         "SET NOCOUNT ON;",
         "CREATE TABLE #profil (tabell nvarchar(300), kolumn nvarchar(200), matt varchar(10), varde nvarchar(400), antal bigint);",
     ]
