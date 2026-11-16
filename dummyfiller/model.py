@@ -166,6 +166,7 @@ class Project:
     codebooks: dict[str, list] = field(default_factory=dict)  # inlästa kodverk: diagnosis / procedure / drug -> [[kod, text], ...]
     test_pnr_list: str = ""  # värdelista med officiella testpersonnummer
     custom_generators: dict = field(default_factory=dict)  # kopia av egna generatorer som projektet använder
+    prod_mapping: dict = field(default_factory=dict)  # koppling av tabeller och kolumner mot produktionen (se matching.py)
 
     def table(self, key: str) -> Table | None:
         low = key.lower()

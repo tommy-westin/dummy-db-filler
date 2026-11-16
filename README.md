@@ -118,6 +118,41 @@ Diagrammet är en liten HTML/JavaScript-komponent (`dummyfiller/diagram/index.ht
 | Tal | Intervall med jämn, normal eller skev fördelning. |
 | Valfri Faker-metod | Allt som biblioteket Faker kan generera. |
 
+### Lär från produktion (steg 6)
+
+För den som har behörighet till produktionsdata: analysen läser ett slumpvist urval per tabell till minnet och tar
+fram generatorer som återger produktionens fördelningar – utan att några personuppgifter följer med.
+
+| Det här lärs | Blir |
+|---|---|
+| Kategorier, t.ex. kontakttyp eller status | Värden med vikt (bara värden som förekommer minst k gånger) |
+| Samband, t.ex. kontakttyp → vårdform | Värden som beror på en annan kolumn |
+| Belopp och andra tal | Talfördelning i intervall, utan extremvärden (P1–P99) |
+| Datum | Säsongsprofil: period, månader, veckodagar och klockslag |
+| Koder och nummer | Bara mönstret, t.ex. `RM-2024-#####` – aldrig värdena |
+| Kodtabeller (högst 5 000 rader) | Hela kodlistan som uppslagstabell |
+| Radantal och barn per förälder | Projektets radantal och relationsinställningar |
+| Födelsedatum | Bara åldersintervallet |
+
+**Hård spärr:** personnummer och samordningsnummer, namn, användarnamn, e-post, telefonnummer, gatuadresser, bankkonton
+och fritext spärras – efter kolumnnamn, tolkning och innehåll, så att även en kolumn med ett oskyldigt namn fångas.
+Spärrade kolumner kan inte väljas och spärren går inte att stänga av. Enskilda värden som liknar personuppgifter tas
+dessutom bort ur tillåtna kolumner. Värden som förekommer färre än k gånger tas aldrig med (k ≥ 5, standard 10).
+Anslutningen öppnas med läsavsikt (`ApplicationIntent=ReadOnly`), lösenordet sparas inte, och varje analys loggas
+med vem, när, källa och vilka kolumner som lärdes eller spärrades.
+
+**Olika namn i produktionen:** efter anslutningen hämtar **🔗 Hämta produktionens schema** produktionens tabeller,
+vyer och kolumner (bara metadata) och matchar dem automatiskt mot projektet – på exakta namn, namn utan prefix som
+`tbl`/`dim`, svenska och engelska synonymer (FirstName ↔ Fornamn, Pnr ↔ Personnummer) och likhet i stavning. I
+matchningsvyn ligger projektet till vänster och produktionen till höger: dra från pricken vid en tabell eller kolumn till
+andra sidan, eller klicka på en på varje sida, för att koppla; klicka på en linje för att ta bort kopplingen. Linjerna
+är gröna (exakt), orange (automatisk) och blå (manuell); röd streckad betyder olika slags datatyp. Klicka på en tabell
+för att matcha dess kolumner. Kopplingen sparas i projektet, och spärren för personuppgifter prövar både projektets och
+produktionens kolumnnamn.
+
+Resultatet blir generatorer i biblioteket (`Lärd: Tabell.Kolumn`) som kan delas med utvecklarna. Verktyget minskar
+risken men ersätter inte er egen bedömning – stäm gärna av upplägget med dataskyddsombudet.
+
 ### Egna generatorer och regionens egna koder (steg 6)
 
 - **Uppslagstabell:** klistra in eller läs in en tabell, t.ex. regionens ansvarskoder med benämning och förvaltning.
@@ -216,6 +251,8 @@ Anslutningen tas från projektfilen (eller `--url`). Lösenord för SQL-inloggni
 | `dummyfiller/app.py`, `__main__.py` | Webbgränssnittet (Streamlit) och kommandoraden |
 | `dummyfiller/store.py` | Automatisk sparning och versionshistorik i SQLite |
 | `dummyfiller/library.py` | Generatorbiblioteket: egna generatorer, ändrade inbyggda listor, export och import |
+| `dummyfiller/learn.py` | Lär från produktion: spärrar för personuppgifter, k-anonymitet, fördelningar och mönster |
+| `dummyfiller/matching.py`, `mapper/index.html` | Matchning av projektets tabeller och kolumner mot produktionens, med grafisk matchningsvy |
 | `dummyfiller/diagram/index.html`, `edit.py` | Tabelldiagrammet och redigering av struktur (byta namn, koppla, placera) |
 
 En ny generator läggs till med dekoratorn `@register(...)` i `generators.py`; parameterlistan blir

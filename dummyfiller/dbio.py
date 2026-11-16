@@ -27,7 +27,7 @@ def list_drivers() -> list[str]:
 
 
 def build_url(server: str, database: str, auth: str = AUTH_MODES[0], user: str = "", password: str = "",
-              driver: str = "ODBC Driver 18 for SQL Server", encrypt: bool = True, trust_cert: bool = True) -> URL:
+              driver: str = "ODBC Driver 18 for SQL Server", encrypt: bool = True, trust_cert: bool = True, read_only: bool = False) -> URL:
     parts = [f"DRIVER={{{driver}}}", f"SERVER={server}", f"DATABASE={database}"]
     if auth == AUTH_MODES[0]:
         parts.append("Trusted_Connection=yes")
@@ -40,6 +40,8 @@ def build_url(server: str, database: str, auth: str = AUTH_MODES[0], user: str =
     parts.append(f"Encrypt={'yes' if encrypt else 'no'}")
     if trust_cert:
         parts.append("TrustServerCertificate=yes")
+    if read_only:  # läsavsikt: kan styras till en läsbar replika, och markerar att inget ska skrivas
+        parts.append("ApplicationIntent=ReadOnly")
     return URL.create("mssql+pyodbc", query={"odbc_connect": ";".join(parts)})
 
 
@@ -144,6 +146,35 @@ def prepare_append(engine: Engine, project: Project, new_tables: set[str], since
                 data.rows = [list(r) for r in conn.execute(sa.select(*[tbl.c[n] for n in cols]).limit(limit)).all()]
                 ap.existing[t.key] = data
     return ap
+
+
+def list_tables(engine: Engine, schemas: list[str] | None = None, views: bool = True) -> list[dict]:
+    """Tabeller (och vyer) med kolumner och datatyper – bara metadata, ingen data. Används för matchning mot produktion."""
+    from .model import parse_type
+    insp = sa.inspect(engine)
+    mssql = engine.dialect.name == "mssql"
+    if engine.dialect.name == "sqlite":
+        wanted = [None]
+    else:
+        wanted = schemas or [s for s in insp.get_schema_names() if s.lower() not in _SYSTEM_SCHEMAS]
+    out = []
+    for schema in wanted:
+        names = [(n, False) for n in insp.get_table_names(schema=schema)]
+        if views:
+            try:
+                names += [(n, True) for n in insp.get_view_names(schema=schema)]
+            except Exception:
+                pass
+        for name, is_view in names:
+            cols = []
+            for c in insp.get_columns(name, schema=schema):
+                try:
+                    type_raw = str(c["type"])
+                except Exception:
+                    type_raw = type(c["type"]).__name__
+                cols.append({"name": c["name"], "type": type_raw, "kind": parse_type(type_raw, mssql)["kind"]})
+            out.append({"schema": schema or "", "name": name, "view": is_view, "columns": cols})
+    return out
 
 
 # ---------------------------------------------------------------- skriva

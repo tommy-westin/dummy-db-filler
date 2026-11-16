@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<title>Matchning</title>
+<!--
+  Matchning av projekt mot produktion: två listor med linjer emellan. Fristående HTML/JavaScript utan externa bibliotek.
+    in:  streamlit:render  {args: {left, right, links, selected, leftTitle, rightTitle, height, hint, mode}, theme}
+         left/right: [{id, label, sub, note, warn}]   links: [{l, r, kind: exakt|automatisk|manuell, score, mismatch}]
+    ut:  streamlit:setComponentValue {value: {seq, type: select|link|unlink, l, r}}
+  Koppla: dra från pricken vid ett objekt till ett objekt på andra sidan, eller klicka på ett objekt på varje sida.
+  Ta bort: klicka på linjen.
+-->
+<style>
+  :root { --bg: #fff; --panel: #f4f6f9; --text: #1f2933; --accent: #2f6fde;
+    --line: color-mix(in srgb, var(--text) 16%, transparent); --muted: color-mix(in srgb, var(--text) 58%, transparent);
+    --exact: #2e9e5b; --auto: #d18a17; --manual: #4f8df7; --warn: #d1453b; --sel: #4f8df7; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: transparent; color: var(--text); overflow: hidden;
+    font: 12.5px/1.35 "Source Sans Pro", "Segoe UI", system-ui, sans-serif; }
+  #frame { position: absolute; inset: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); overflow: hidden; }
+  #toolbar { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; padding: 7px 10px; background: var(--panel);
+    border-bottom: 1px solid var(--line); align-items: center; }
+  .side { display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .side.right { justify-content: flex-end; }
+  .side b { white-space: nowrap; }
+  .side input[type=search] { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 3px 8px; min-width: 0; flex: 1 1 auto; max-width: 220px; }
+  .side label { color: var(--muted); white-space: nowrap; display: flex; gap: 4px; align-items: center; cursor: pointer; }
+  #legend { display: flex; justify-content: center; gap: 10px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+  #legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 3px; }
+  #scroll { position: relative; flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; }
+  #wrap { position: relative; display: grid; grid-template-columns: 1fr 120px 1fr; padding: 10px 10px 18px; min-height: 100%; }
+  #lines { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  #lines path.hit { pointer-events: stroke; stroke: transparent; stroke-width: 12; fill: none; cursor: pointer; }
+  #lines path.ln { fill: none; stroke-width: 2; }
+  #lines path.ln.sel { stroke-width: 3.2; }
+  #lines path.ln.mismatch { stroke-dasharray: 5 4; }
+  #lines path.temp { fill: none; stroke: var(--sel); stroke-width: 2; stroke-dasharray: 5 4; }
+  .list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .item { position: relative; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 7px;
+    padding: 5px 10px; background: var(--bg); cursor: pointer; user-select: none; min-height: 34px; }
+  .item:hover { border-color: var(--sel); }
+  .item.armed { border-color: var(--sel); box-shadow: 0 0 0 2px color-mix(in srgb, var(--sel) 40%, transparent); }
+  .item.selected { background: color-mix(in srgb, var(--sel) 14%, transparent); }
+  .item.drop { background: color-mix(in srgb, var(--sel) 28%, transparent); border-color: var(--sel); }
+  .item.unmatched { border-style: dashed; }
+  .item .txt { min-width: 0; flex: 1 1 auto; }
+  .item .lbl { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .note { flex: 0 0 auto; font-size: 11px; color: var(--muted); }
+  .item .note.warn { color: var(--warn); }
+  .item.used .lbl::after { content: " ✓"; color: var(--exact); font-weight: 400; }
+  .dot { position: absolute; top: 50%; width: 12px; height: 12px; margin-top: -6px; border-radius: 50%; background: var(--sel);
+    border: 2px solid var(--bg); cursor: crosshair; opacity: .35; }
+  .left .dot { right: -7px; } .right .dot { left: -7px; }
+  .item:hover .dot, .item.armed .dot { opacity: 1; }
+  .empty { color: var(--muted); padding: 14px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="frame">
+  <div id="toolbar">
+    <div class="side"><b id="ltitle"></b><input id="lsearch" type="search" placeholder="Sök …"><label><input id="lonly" type="checkbox">bara omatchade</label></div>
+    <div id="legend"><span><i style="background:var(--exact)"></i>exakt</span><span><i style="background:var(--auto)"></i>automatisk</span><span><i style="background:var(--manual)"></i>manuell</span></div>
+    <div class="side right"><label><input id="ronly" type="checkbox">dölj använda</label><input id="rsearch" type="search" placeholder="Sök …"><b id="rtitle"></b></div>
+  </div>
+  <div id="scroll"><div id="wrap">
+    <svg id="lines" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="left" class="list left"></div><div></div><div id="right" class="list right"></div>
+  </div></div>
+</div>
+<script>
+(function () {
+  "use strict";
+  var NS = "http://www.w3.org/2000/svg";
+  var args = null, armed = null, drag = null, temp = null;
+  var leftEl = document.getElementById("left"), rightEl = document.getElementById("right");
+  var svg = document.getElementById("lines"), scroll = document.getElementById("scroll"), wrap = document.getElementById("wrap");
+  var COLORS = { "exakt": "var(--exact)", "automatisk": "var(--auto)", "manuell": "var(--manual)" };
+
+  function post(type, data) {
+    var m = { isStreamlitMessage: true, type: type };
+    for (var k in (data || {})) { m[k] = data[k]; }
+    window.parent.postMessage(m, "*");
+  }
+  function emit(ev) {
+    ev.seq = Date.now() + ":" + Math.random().toString(36).slice(2, 8);
+    post("streamlit:setComponentValue", { value: ev, dataType: "json" });
+  }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) { e.className = cls; }
+    if (text !== undefined && text !== null) { e.textContent = text; }
+    return e;
+  }
+  function closest(n, cls) {
+    while (n && n !== document) { if (n.classList && n.classList.contains(cls)) { return n; } n = n.parentNode; }
+    return null;
+  }
+  function linkOf(side, id) {
+    return (args.links || []).find(function (l) { return (side === "l" ? l.l : l.r) === id; });
+  }
+  function matches(item, q) {
+    if (!q) { return true; }
+    q = q.toLowerCase();
+    return (item.label + " " + (item.sub || "")).toLowerCase().indexOf(q) >= 0;
+  }
+  function itemEl(side, id) {
+    var list = side === "l" ? leftEl : rightEl;
+    for (var i = 0; i < list.children.length; i++) { if (list.children[i].dataset.id === id) { return list.children[i]; } }
+    return null;
+  }
+
+  function build() {
+    var lq = document.getElementById("lsearch").value, rq = document.getElementById("rsearch").value;
+    var lonly = document.getElementById("lonly").checked, ronly = document.getElementById("ronly").checked;
+    [[leftEl, args.left, "l", lq, lonly], [rightEl, args.right, "r", rq, ronly]].forEach(function (s) {
+      var list = s[0];
+      while (list.firstChild) { list.removeChild(list.firstChild); }
+      var shown = 0;
+      s[1].forEach(function (it) {
+        var link = linkOf(s[2], it.id);
+        if (!matches(it, s[3]) || (s[4] && link && !(s[2] === "r" && armed && link.l === armed))) { return; }
+        var cls = "item" + (link ? (s[2] === "r" ? " used" : "") : (s[2] === "l" ? " unmatched" : "")) + (s[2] === "l" && armed === it.id ? " armed" : "") +
+                  (s[2] === "l" && args.selected === it.id ? " selected" : "");
+        var d = el("div", cls);
+        d.dataset.id = it.id;
+        d.dataset.side = s[2];
+        var txt = el("div", "txt");
+        txt.appendChild(el("div", "lbl", it.label));
+        if (it.sub) { txt.appendChild(el("div", "sub", it.sub)); }
+        d.appendChild(txt);
+        if (it.note) { d.appendChild(el("span", "note" + (it.warn ? " warn" : ""), it.note)); }
+        d.appendChild(el("span", "dot"));
+        d.title = it.label + (it.sub ? " · " + it.sub : "") + (s[2] === "l" ? " – klicka för att välja, dra från pricken för att koppla" : " – klicka eller släpp här för att koppla");
+        list.appendChild(d);
+        shown++;
+      });
+      if (!shown) { list.appendChild(el("div", "empty", s[1].length ? "Inget matchar sökningen." : "Inget att visa.")); }
+    });
+    lines();
+  }
+  function anchor(side, id) {
+    var e = itemEl(side, id);
+    if (!e) { return null; }
+    return { x: side === "l" ? e.offsetLeft + e.offsetWidth : e.offsetLeft, y: e.offsetTop + e.offsetHeight / 2 };
+  }
+  function curve(a, b) {
+    var k = Math.max(30, (b.x - a.x) / 2);
+    return "M " + a.x + " " + a.y + " C " + (a.x + k) + " " + a.y + ", " + (b.x - k) + " " + b.y + ", " + b.x + " " + b.y;
+  }
+  function lines() {
+    while (svg.firstChild) { svg.removeChild(svg.firstChild); }
+    svg.setAttribute("height", wrap.scrollHeight);
+    (args.links || []).forEach(function (l) {
+      var a = anchor("l", l.l), b = anchor("r", l.r);
+      if (!a || !b) { return; }
+      var d = curve(a, b);
+      var p = document.createElementNS(NS, "path");
+      p.setAttribute("d", d);
+      p.setAttribute("class", "ln" + (l.mismatch ? " mismatch" : "") + (args.selected === l.l || armed === l.l ? " sel" : ""));
+      p.style.stroke = l.mismatch ? "var(--warn)" : COLORS[l.kind] || "var(--muted)";
+      svg.appendChild(p);
+      var h = document.createElementNS(NS, "path");
+      h.setAttribute("d", d);
+      h.setAttribute("class", "hit");
+      h.dataset.l = l.l;
+      var t = document.createElementNS(NS, "title");
+      t.textContent = (l.kind || "") + (l.score && l.kind !== "manuell" ? " (" + Math.round(l.score * 100) + " %)" : "") +
+                      (l.mismatch ? " · olika datatyp" : "") + " – klicka för att ta bort kopplingen";
+      h.appendChild(t);
+      svg.appendChild(h);
+    });
+    if (temp) { svg.appendChild(temp); }
+  }
+  function point(e) {
+    var r = wrap.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  wrap.addEventListener("pointerdown", function (e) {
+    if (!args || e.button !== 0) { return; }
+    var item = closest(e.target, "item");
+    if (e.target.classList.contains("dot") && item) {
+      var a = anchor(item.dataset.side, item.dataset.id);
+      drag = { side: item.dataset.side, id: item.dataset.id, a: a };
+      temp = document.createElementNS(NS, "path");
+      temp.setAttribute("class", "temp");
+      svg.appendChild(temp);
+      e.preventDefault();
+    }
+  });
+  window.addEventListener("pointermove", function (e) {
+    if (!drag) { return; }
+    var p = point(e);
+    temp.setAttribute("d", drag.side === "l" ? curve(drag.a, p) : curve(p, drag.a));
+    var r = scroll.getBoundingClientRect();  // rulla listan när pekaren närmar sig kanten
+    if (e.clientY > r.bottom - 30) { scroll.scrollTop += 14; } else if (e.clientY < r.top + 30) { scroll.scrollTop -= 14; }
+    var drops = document.querySelectorAll(".item.drop");
+    for (var i = 0; i < drops.length; i++) { drops[i].classList.remove("drop"); }
+    var over = closest(document.elementFromPoint(e.clientX, e.clientY), "item");
+    if (over && over.dataset.side !== drag.side) { over.classList.add("drop"); }
+  });
+  window.addEventListener("pointerup", function (e) {
+    if (!drag) { return; }
+    var d = drag;
+    drag = null;
+    if (temp && temp.parentNode) { temp.parentNode.removeChild(temp); }
+    temp = null;
+    var over = closest(document.elementFromPoint(e.clientX, e.clientY), "item");
+    var drops = document.querySelectorAll(".item.drop");
+    for (var i = 0; i < drops.length; i++) { drops[i].classList.remove("drop"); }
+    if (over && over.dataset.side !== d.side) {
+      armed = null;
+      emit({ type: "link", l: d.side === "l" ? d.id : over.dataset.id, r: d.side === "r" ? d.id : over.dataset.id });
+    }
+  });
+  wrap.addEventListener("click", function (e) {
+    if (e.target.classList.contains("dot")) { return; }
+    if (e.target.classList && e.target.classList.contains("hit")) {
+      emit({ type: "unlink", l: e.target.dataset.l });
+      return;
+    }
+    var item = closest(e.target, "item");
+    if (!item) { return; }
+    if (item.dataset.side === "l") {
+      armed = armed === item.dataset.id ? null : item.dataset.id;
+      build();
+      if (args.mode === "tables") { emit({ type: "select", l: item.dataset.id }); }
+    } else if (armed) {
+      var l = armed;
+      armed = null;
+      emit({ type: "link", l: l, r: item.dataset.id });
+    } else {
+      var link = linkOf("r", item.dataset.id);
+      if (link) { armed = link.l; build(); }  // visa vilken projektpost som använder den
+    }
+  });
+  ["lsearch", "rsearch"].forEach(function (id) { document.getElementById(id).addEventListener("input", build); });
+  ["lonly", "ronly"].forEach(function (id) { document.getElementById(id).addEventListener("change", build); });
+  window.addEventListener("resize", function () { if (args) { lines(); } });
+  window.addEventListener("keydown", function (e) { if (e.key === "Escape" && armed) { armed = null; build(); } });
+
+  function theme(t) {
+    if (!t) { return; }
+    var s = document.documentElement.style;
+    if (t.backgroundColor) { s.setProperty("--bg", t.backgroundColor); }
+    if (t.secondaryBackgroundColor) { s.setProperty("--panel", t.secondaryBackgroundColor); }
+    if (t.textColor) { s.setProperty("--text", t.textColor); }
+    if (t.primaryColor) { s.setProperty("--accent", t.primaryColor); }
+    if (t.font) { document.body.style.fontFamily = t.font; }
+  }
+  window.addEventListener("message", function (e) {
+    var d = e.data;
+    if (!d || d.type !== "streamlit:render") { return; }
+    theme(d.theme);
+    var prevMode = args && args.mode;
+    args = d.args;
+    if (prevMode && prevMode !== args.mode) { armed = null; }
+    if (armed && !args.left.some(function (x) { return x.id === armed; })) { armed = null; }
+    document.getElementById("ltitle").textContent = args.leftTitle || "";
+    document.getElementById("rtitle").textContent = args.rightTitle || "";
+    post("streamlit:setFrameHeight", { height: args.height || 460 });
+    build();
+  });
+  post("streamlit:componentReady", { apiVersion: 1 });
+  if (window.__DEMO__) { theme(window.__DEMO_THEME__); window.postMessage({ type: "streamlit:render", args: window.__DEMO__ }, "*"); }
+})();
+</script>
+</body>
+</html>

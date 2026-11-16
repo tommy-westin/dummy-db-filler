@@ -17,7 +17,7 @@ import streamlit.components.v1 as components  # noqa: E402
 
 from datetime import date, timedelta  # noqa: E402
 
-from dummyfiller import care, dbio, edit, export, library, prodprofile, quality, rules, store, valuelists  # noqa: E402
+from dummyfiller import care, dbio, edit, export, learn, library, matching, prodprofile, quality, rules, store, valuelists  # noqa: E402
 from dummyfiller.ddl import parse_ddl  # noqa: E402
 from dummyfiller.dirty import KINDS as DIRTY_KINDS  # noqa: E402
 from dummyfiller.engine import estimated_rows, generate, load_order  # noqa: E402
@@ -1286,6 +1286,8 @@ def tab_codebooks():
 
 
 def tab_profile():
+    st.info("Har du själv åtkomst till produktionen? Använd **6. Generatorer → Lär från produktion** i stället: den analyserar direkt, "
+            "spärrar personuppgifter och skapar generatorer. Skriptet här är till för när någon annan behöver köra analysen åt dig.")
     st.write("Få datan att likna produktion utan att någon rad lämnar den. Skriptet nedan returnerar **bara aggregat**: radantal, "
              "andel NULL, lägsta/högsta/medel för tal, första/sista datum och värdefördelning för kolumner med få unika värden. "
              "Identifierande kolumner (namn, personnummer, adress, fritext, nycklar) ingår inte, och sällsynta värden utelämnas.")
@@ -1666,16 +1668,268 @@ def tab_share():
                "`python -m dummyfiller generate projekt.yaml --bibliotek fil.yaml` använder filen utan att ändra det lokala biblioteket.")
 
 
+PROTECTION_TEXT = """
+- **Bara aggregat sparas.** Ett slumpvist urval läses in i minnet under analysen och slängs när tabellen är klar. Det som
+  sparas är fördelningar, intervall, mönster och – för kodtabeller – koderna.
+- **Hård spärr.** Personnummer och samordningsnummer, namn, användarnamn, e-post, telefonnummer, gatuadresser, bankkonton och
+  fritext spärras – både efter kolumnens namn och efter innehållet, så att en kolumn med ett oskyldigt namn ändå fångas.
+  Spärrade kolumner kan inte väljas, och spärren går inte att stänga av.
+- **Även enskilda värden** som ser ut som personuppgifter tas bort ur tillåtna kolumner.
+- **Födelsedatum** är skyddade: bara åldersintervallet (P1–P99) lärs.
+- **Små grupper utelämnas:** värden som förekommer färre än k gånger tas aldrig med (k är minst 5). Extremvärden skärs bort.
+- **Logg:** varje analys loggas med vem, när, vilken databas och vilka kolumner som lärdes eller spärrades.
+- Anslutningen öppnas med läsavsikt (ApplicationIntent=ReadOnly) och lösenordet sparas inte.
+"""
+LEARN_KIND = {"choice": "Värden med vikt", "bool": "Andel sant", "histogram": "Talfördelning", "date": "Säsongsprofil",
+              "pattern": "Mönster", "conditional": "Beroende värden", "birth": "Åldersintervall", "codetable": "Kodtabell"}
+
+
+def prod_engine():
+    c = ss.prod_conn
+    if c["mode"] == "SQL Server":
+        if not c["server"] or not c["database"]:
+            raise RuntimeError("Ange server och databas för produktionen.")
+        url = dbio.build_url(c["server"], c["database"], c["auth"], c["user"], ss.get("prod_pw", ""),
+                             c["driver"] or (dbio.list_drivers() or ["ODBC Driver 18 for SQL Server"])[0], c["encrypt"], c["trust"], read_only=True)
+    else:
+        if not c["url"]:
+            raise RuntimeError("Ange en SQLAlchemy-URL.")
+        url = c["url"]
+    return dbio.make_engine(url)
+
+
+_mapper = components.declare_component("dummyfiller_mapper", path=str(Path(__file__).resolve().parent / "mapper"))
+
+
+def handle_map_event(ev: dict, mode: str) -> None:
+    m = project.prod_mapping
+    schema = ss.get("prod_schema") or []
+    kind = ev.get("type")
+    if mode == "tables":
+        if kind == "select":
+            ss.map_sel = ev.get("l")
+        elif kind == "link" and any(matching.prod_key(p) == ev.get("r") for p in schema) and project.table(ev.get("l", "")):
+            matching.link_table(project, m, schema, ev["l"], ev["r"])
+            ss.map_sel = ev["l"]
+        elif kind == "unlink":
+            matching.link_table(project, m, schema, ev["l"], None)
+    elif ss.get("map_sel"):
+        if kind == "link":
+            matching.link_column(m, ss.map_sel, ev["l"], ev["r"])
+        elif kind == "unlink":
+            matching.link_column(m, ss.map_sel, ev["l"], None)
+
+
+def learn_matching(keys: list[str]) -> dict | None:
+    """Steg 2: matcha projektets tabeller och kolumner mot produktionens. Returnerar kopplingen, eller None (samma namn)."""
+    st.markdown("**2. Matcha projektet mot produktionen**")
+    for cmp_key, seq_key, mode in (("map_tables_cmp", "map_seq_t", "tables"), ("map_cols_cmp", "map_seq_c", "columns")):
+        ev = ss.get(cmp_key)  # händelsen från matchningsvyn som startade den här körningen
+        if isinstance(ev, dict) and ev.get("seq") != ss.get(seq_key):
+            ss[seq_key] = ev.get("seq")
+            if ss.get("prod_schema") is not None:
+                handle_map_event(ev, mode)
+    a, b, c, _ = st.columns([1.5, 1.3, 0.9, 2])
+    if a.button("🔗 Hämta produktionens schema", help="Läser bara metadata: tabeller, vyer, kolumner och datatyper. Ingen data."):
+        try:
+            with st.spinner("Läser produktionens schema …"):
+                ss.prod_schema = dbio.list_tables(prod_engine())
+            project.prod_mapping = matching.auto_match(project, ss.prod_schema, project.prod_mapping)
+            ss.map_sel = next((k2 for k2 in keys if k2 in project.prod_mapping["tables"]), None)
+        except Exception as e:
+            st.error(f"Kunde inte läsa schemat: {e}")
+    schema = ss.get("prod_schema")
+    saved = project.prod_mapping if (project.prod_mapping or {}).get("tables") else None
+    if schema is None:
+        if saved:
+            st.caption(f"Projektets sparade matchning används ({len(saved['tables'])} tabeller). Hämta produktionens schema för att se och ändra den.")
+        else:
+            st.caption("Hämta produktionens schema för att matcha tabeller och kolumner som heter olika i projektet och i produktionen. "
+                       "Utan matchning letas de upp med samma namn som i projektet.")
+        return saved
+    if b.button("✨ Matcha automatiskt", help="Matchar det som inte är kopplat för hand. Dina manuella kopplingar behålls."):
+        project.prod_mapping = matching.auto_match(project, schema, project.prod_mapping)
+    if c.button("Börja om", help="Tar bort alla kopplingar, även manuella, och matchar automatiskt på nytt."):
+        project.prod_mapping = matching.auto_match(project, schema, None, reset=True)
+    m = project.prod_mapping
+    m.setdefault("tables", {})
+    m.setdefault("columns", {})
+    by_key = {matching.prod_key(p): p for p in schema}
+    s = matching.summary(project, m, keys)
+    st.caption(f"{s['tabeller']} av {s['av']} tabeller matchade · {s['omatchade kolumner']} kolumner utan motsvarighet · "
+               f"{len(schema)} tabeller och vyer i produktionen. Dra från pricken vid en tabell till en tabell på andra sidan – eller "
+               "klicka på en på varje sida – för att koppla. Klicka på en linje för att ta bort kopplingen.")
+
+    left = []
+    for key in keys:
+        t = project.table(key)
+        tm = m["tables"].get(key)
+        ncols = len([x for x in t.columns if not x.computed])
+        nm = len(m["columns"].get(key, {})) if tm else 0
+        left.append({"id": key, "label": t.name, "sub": (f"{t.schema} · " if t.schema else "") + f"{ncols} kolumner",
+                     "note": f"{nm}/{ncols} kolumner" if tm else "ej matchad", "warn": not tm or nm < ncols})
+    right = [{"id": matching.prod_key(p), "label": p["name"],
+              "sub": (f"{p['schema']} · " if p["schema"] else "") + f"{len(p['columns'])} kolumner" + (" · vy" if p.get("view") else "")}
+             for p in sorted(schema, key=lambda p: (p["schema"], p["name"].lower()))]
+    links = [{"l": k2, "r": matching.prod_key(v), "kind": v["kind"], "score": v.get("score", 1)}
+             for k2, v in m["tables"].items() if k2 in keys and matching.prod_key(v) in by_key]
+    _mapper(left=left, right=right, links=links, selected=ss.get("map_sel"), leftTitle="Projektet", rightTitle="Produktionen",
+            mode="tables", height=min(560, 100 + 40 * max(len(left), min(len(right), 12))), key="map_tables_cmp", default=None)
+
+    sel = ss.get("map_sel")
+    tm = m["tables"].get(sel) if sel else None
+    if sel and tm and matching.prod_key(tm) in by_key:
+        t, p = project.table(sel), by_key[matching.prod_key(tm)]
+        st.markdown(f"**Kolumner:** {t.name} ↔ {matching.prod_key(tm)}")
+        cm = m["columns"].get(sel, {})
+        prod_cols = {x["name"]: x for x in p["columns"]}
+        cleft = [{"id": x.name, "label": x.name, "sub": x.type_raw + ("" if x.nullable else " NOT NULL"),
+                  "note": "" if x.name in cm else "ingen motsvarighet", "warn": x.name not in cm} for x in t.columns if not x.computed]
+        cright = [{"id": x["name"], "label": x["name"], "sub": x["type"]} for x in p["columns"]]
+        clinks = [{"l": a2, "r": v["name"], "kind": v["kind"], "score": v.get("score", 1),
+                   "mismatch": matching.type_mismatch(t.column(a2), prod_cols[v["name"]]["kind"])}
+                  for a2, v in cm.items() if t.column(a2) is not None and v["name"] in prod_cols]
+        _mapper(left=cleft, right=cright, links=clinks, selected=None, leftTitle=t.name, rightTitle=p["name"], mode="columns",
+                height=min(640, 100 + 40 * max(len(cleft), min(len(cright), 14))), key="map_cols_cmp", default=None)
+        st.caption("Röd streckad linje: olika slags datatyp – värdena tolkas då som projektets typ. Kolumner utan motsvarighet hoppas över i analysen. "
+                   "Spärren för personuppgifter prövar både projektets och produktionens kolumnnamn.")
+    elif sel:
+        st.caption(f"Koppla {project.table(sel).name} till en tabell i produktionen för att matcha kolumnerna.")
+    else:
+        st.caption("Klicka på en tabell till vänster för att se och matcha dess kolumner.")
+    return m
+
+
+def tab_learn():
+    ss.setdefault("prod_conn", {"mode": "SQL Server", "server": "", "database": "", "auth": dbio.AUTH_MODES[0], "user": "", "driver": "",
+                                "encrypt": True, "trust": True, "url": ""})
+    st.write("Skapa generatorer utifrån **produktionsdata**, utan att några personuppgifter följer med. Kör analysen på en dator där du "
+             "har behörighet till produktionsdata; resultatet – bara aggregat – kan sedan delas med utvecklarna via biblioteket.")
+    with st.expander("🛡️ Så skyddas personuppgifterna"):
+        st.markdown(PROTECTION_TEXT)
+        st.caption("Verktyget minskar risken men ersätter inte er egen bedömning. Stäm gärna av upplägget med dataskyddsombudet.")
+    res = ss.get("learn_result")
+    with st.expander("1. Anslutning till produktion", expanded=res is None):
+        c = ss.prod_conn
+        c["mode"] = st.radio("Anslutning", ["SQL Server", "Egen SQLAlchemy-URL"], index=0 if c["mode"] == "SQL Server" else 1, horizontal=True, key="prod_mode")
+        if c["mode"] == "SQL Server":
+            a, b = st.columns(2)
+            c["server"] = a.text_input("Server", c["server"], key="prod_server")
+            c["database"] = b.text_input("Databas", c["database"], key="prod_db")
+            c["auth"] = a.selectbox("Inloggning", dbio.AUTH_MODES, index=dbio.AUTH_MODES.index(c["auth"]), key="prod_auth")
+            drivers = dbio.list_drivers() or ["ODBC Driver 18 for SQL Server"]
+            c["driver"] = b.selectbox("ODBC-drivrutin", drivers, index=drivers.index(c["driver"]) if c["driver"] in drivers else 0, key="prod_driver")
+            if c["auth"] != dbio.AUTH_MODES[0]:
+                c["user"] = a.text_input("Användare", c["user"], key="prod_user")
+            if c["auth"] == dbio.AUTH_MODES[1]:
+                ss.prod_pw = b.text_input("Lösenord", ss.get("prod_pw", ""), type="password", key="prod_pw_input")
+            c["encrypt"] = a.checkbox("Kryptera anslutningen", c["encrypt"], key="prod_enc")
+            c["trust"] = b.checkbox("Lita på serverns certifikat", c["trust"], key="prod_trust")
+        else:
+            c["url"] = st.text_input("SQLAlchemy-URL", c["url"], key="prod_url")
+        st.caption("Anslutningen sparas inte i projektet. Det räcker med läsbehörighet.")
+
+    if not project.tables:
+        st.info("Läs in schemat först (steg 1). Analysen använder projektets tabeller och letar upp motsvarande tabeller i produktionen.")
+        return
+    keys = [t.key for t in project.tables]
+    mapping = learn_matching(keys)
+    st.markdown("**3. Vad ska läras?**")
+    default = [t.key for t in project.tables if t.include and (mapping is None or t.key in (mapping.get("tables") or {}))]
+    sel = st.multiselect("Tabeller", keys, default=default, key="learn_tables",
+                         help="Tabeller som inte är matchade mot produktionen hoppas över." if mapping is not None else None)
+    a, b, _ = st.columns([1, 1, 2])
+    k = int(a.number_input("Minsta antal förekomster (k)", learn.K_MIN, 1000, 10, key="learn_k",
+                           help=f"Värden som förekommer färre gånger än så här tas aldrig med. Kan inte sättas lägre än {learn.K_MIN}."))
+    n = int(b.number_input("Urval per tabell (rader)", learn.CODE_TABLE_MAX, 1_000_000, 50_000, step=10_000, key="learn_sample",
+                           help="Ett slumpvist urval läses in i minnet under analysen och slängs sedan."))
+    if st.button("🔍 Analysera produktionsdata", type="primary", disabled=not sel):
+        bar = st.progress(0.0, "Analyserar …")
+        try:
+            c = ss.prod_conn
+            source = f"{c['server']}/{c['database']}" if c["mode"] == "SQL Server" else c["url"].split("@")[-1].split("///")[-1]
+            ss.learn_result = learn.analyse(prod_engine(), project, sel, k, n, source=source, mapping=mapping,
+                                            progress=lambda key, i, total: bar.progress(i / max(total, 1), f"Analyserar {key} …"))
+            ss.learn_v = ss.get("learn_v", 0) + 1
+        except Exception as e:
+            st.error(f"Analysen misslyckades: {e}")
+        bar.empty()
+        res = ss.get("learn_result")
+
+    if res is not None:
+        st.markdown("**4. Granska och skapa generatorer**")
+        st.caption(f"Analys av {res.meta.get('source')} {res.meta.get('at', '').replace('T', ' ')} · k = {res.meta.get('k')} · av {res.meta.get('user')}")
+        for tr in res.tables:
+            if tr.error:
+                st.warning(f"{tr.table}: {tr.error}")
+        learned = [f for f in res.findings if f.status == learn.LEARNED]
+        blocked = [f for f in res.findings if f.status in (learn.BLOCKED, learn.PROTECTED) and f.kind != "birth"]
+        skipped = [f for f in res.findings if f.status == learn.SKIPPED]
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Kolumner som kan läras", len(learned))
+        m2.metric("🔒 Spärrade", len(blocked))
+        m3.metric("Hoppas över", len(skipped))
+        if learned:
+            df = pd.DataFrame([{"Använd": True, "Tabell": f.table, "Kolumn": f.column, "Slag": LEARN_KIND.get(f.kind, f.kind),
+                                "Det här lärs": f.summary + (f" · {f.reason}" if f.reason else ""),
+                                "Andel NULL %": f.null_pct} for f in learned])
+            edited = st.data_editor(df, hide_index=True, width="stretch", key=f"learn_pick_{ss.get('learn_v', 0)}",
+                                    disabled=["Tabell", "Kolumn", "Slag", "Det här lärs", "Andel NULL %"],
+                                    column_config={"Det här lärs": st.column_config.TextColumn(width="large")})
+        if blocked:
+            st.markdown("**🔒 Spärrade kolumner** – lärs inte och kan inte väljas")
+            st.dataframe(pd.DataFrame([{"Tabell": f.table, "Kolumn": f.column, "Skäl": f.reason} for f in blocked]), hide_index=True, width="stretch")
+        if skipped:
+            with st.expander(f"Kolumner som hoppas över ({len(skipped)})"):
+                st.dataframe(pd.DataFrame([{"Tabell": f.table, "Kolumn": f.column, "Skäl": f.reason} for f in skipped]), hide_index=True, width="stretch")
+        structure = [{"Tabell": tr.table, "Rader i produktion": tr.rows, "Urval": tr.sampled,
+                      "Barn per förälder": " · ".join(f"{fo['column']} → {fo['parent']}: {fo['summary']}" for fo in tr.fanout)}
+                     for tr in res.tables if not tr.error]
+        if structure:
+            with st.expander("Radantal och relationer"):
+                st.dataframe(pd.DataFrame(structure), hide_index=True, width="stretch")
+        if learned:
+            a, b = st.columns(2)
+            to_library = a.checkbox("Spara som egna generatorer i biblioteket", True, key="learn_lib",
+                                    help="Generatorerna heter 'Lärd: Tabell.Kolumn' och kan delas med teamet. Annars sparas de bara i projektet.")
+            to_project = a.checkbox("Använd dem på projektets kolumner", True, key="learn_proj")
+            rows_mode = b.radio("Radantal", ["Behåll projektets radantal", "Produktionens radantal ×"], key="learn_rows_mode")
+            factor = float(b.number_input("Faktor", 0.0001, 10.0, 0.01, format="%.4f", key="learn_factor",
+                                          help="T.ex. 0,01 för en procent av produktionens storlek. Kodtabeller får alltid alla rader.")) if rows_mode != "Behåll projektets radantal" else None
+            fanout = b.checkbox("Använd produktionens antal barn per förälder", True, key="learn_fanout")
+            if st.button("✅ Skapa generatorer", type="primary"):
+                chosen = {(r["Tabell"], r["Kolumn"]) for r in edited.to_dict("records") if r["Använd"]}
+                done = learn.apply(res, project, chosen, to_library, to_project, factor, fanout)
+                changed()
+                flash("success", "Klart: " + ", ".join(f"{v} {k}" for k, v in done.items() if v) + ".")
+                st.rerun()
+        if st.button("Släng analysresultatet"):
+            ss.learn_result = None
+            st.rerun()
+
+    with st.expander("📜 Logg över analyser av produktionsdata"):
+        log = store.audit_list()
+        if not log:
+            st.caption("Inga analyser ännu.")
+        else:
+            st.dataframe(pd.DataFrame([{"Tid": e["at"].replace("T", " "), "Användare": e.get("user"), "Källa": e.get("source"), "k": e.get("k"),
+                                        "Tabeller": len(e.get("tabeller") or []), "Lärda kolumner": len(e.get("lärs") or []),
+                                        "Spärrade": len(e.get("spärrade") or {}), "Generatorer skapade": len(e.get("generatorer") or [])}
+                                       for e in log]), hide_index=True, width="stretch")
+
+
 def page_generators():
     st.header("6. Generatorer – bygg och anpassa")
-    t1, t2, t3, t4 = st.tabs(["Egna generatorer", "Inbyggda listor", "Regler", "Dela med teamet"])
+    t1, t2, t3, t4, t5 = st.tabs(["Egna generatorer", "Lär från produktion", "Inbyggda listor", "Regler", "Dela med teamet"])
     with t1:
         tab_custom_generators()
     with t2:
-        tab_builtin_lists()
+        tab_learn()
     with t3:
-        tab_rules()
+        tab_builtin_lists()
     with t4:
+        tab_rules()
+    with t5:
         tab_share()
 
 

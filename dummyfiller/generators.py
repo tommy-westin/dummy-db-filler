@@ -749,6 +749,94 @@ def gen_choice_by(ctx, p):
     return _weighted(ctx.rng, hit[0], hit[1]) if sum(hit[1]) > 0 else ctx.rng.choice(hit[0])
 
 
+# ---------------------------------------------------------------- fördelningar (används av "Lär från produktion")
+
+def _parse_weighted_lines(text: str, parse_key) -> list[tuple]:
+    out = []
+    for line in str(text).splitlines():
+        key, sep, w = line.rpartition("|")
+        if not sep:
+            key, w = line, "1"
+        try:
+            weight = float(w.strip().replace(",", "."))
+            if weight > 0:
+                out.append((parse_key(key.strip()), weight))
+        except ValueError:
+            continue
+    return out
+
+
+@register("number.histogram", "Tal enligt fördelning", "Tal", [
+    Param("bins", "Intervall", "text", "0;100 | 1", help="Ett intervall per rad: 'från;till | vikt', t.ex. '100;250 | 12'. Värdet slumpas jämnt inom ett intervall som väljs efter vikt."),
+    Param("decimals", "Decimaler", "int", 0),
+], help="Återger en fördelning, t.ex. lärd från produktion: vanliga intervall blir vanliga.")
+def gen_histogram(ctx, p):
+    cache = ctx.state.get("hist")
+    if cache is None or cache[0] != p["bins"]:
+        def key(s):
+            lo, _, hi = s.partition(";")
+            return float(lo.replace(",", ".")), float(hi.replace(",", "."))
+        bins = _parse_weighted_lines(p["bins"], key)
+        cache = ctx.state["hist"] = (p["bins"], [b for b, _ in bins], [w for _, w in bins])
+    _, bins, weights = cache
+    if not bins:
+        return None
+    lo, hi = _weighted(ctx.rng, bins, weights)
+    x = ctx.rng.uniform(min(lo, hi), max(lo, hi))
+    dec = int(p["decimals"])
+    return int(round(x)) if dec <= 0 else round(x, dec)
+
+
+@register("date.profile", "Datum enligt säsongsprofil", "Datum", [
+    Param("start", "Från", "str", "-3y"), Param("end", "Till", "str", "idag"),
+    Param("months", "Månader", "text", "", help="'ÅÅÅÅ-MM | vikt' per rad. Tomt = jämnt över perioden."),
+    Param("weekdays", "Veckodagar (mån–sön)", "str", "1,1,1,1,1,1,1", help="Sju vikter, t.ex. 5,5,5,5,5,1,1 för mest vardagar."),
+    Param("hours", "Timmar (0–23)", "str", "", help="24 vikter för klockslaget (för datetime). Tomt = slumpad tid."),
+], help="Återger hur händelser fördelar sig över månader, veckodagar och timmar, t.ex. lärt från produktion.")
+def gen_date_profile(ctx, p):
+    key = (p["start"], p["end"], p["months"], p["weekdays"], p["hours"], ctx.since)
+    cache = ctx.state.get("profile")
+    if cache is None or cache[0] != key:
+        a, b = parse_date_spec(p["start"], ctx.today), parse_date_spec(p["end"], ctx.today)
+        if b < a:
+            a, b = b, a
+        if ctx.since and ctx.since > a:
+            a, b = ctx.since, max(b, ctx.since)
+
+        def month(s):
+            y, m = s.split("-")[:2]
+            return int(y), int(m)
+        months = [(ym, w) for ym, w in _parse_weighted_lines(p["months"], month)
+                  if (a.year, a.month) <= ym <= (b.year, b.month)]
+
+        def floats(s, n):
+            try:
+                v = [max(0.0, float(x.replace(",", "."))) for x in str(s).split(",") if x.strip()]
+            except ValueError:
+                return None
+            return v if len(v) == n and sum(v) > 0 else None
+        cache = ctx.state["profile"] = (key, a, b, months, floats(p["weekdays"], 7) or [1.0] * 7, floats(p["hours"], 24))
+    _, a, b, months, wd, hours = cache
+    rng = ctx.rng
+    if months:
+        y, m = _weighted(rng, [ym for ym, _ in months], [w for _, w in months])
+        first = date(y, m, 1)
+        last = (date(y + (m == 12), m % 12 + 1, 1) - timedelta(days=1))
+        lo, hi = max(a, first), min(b, last)
+    else:
+        lo, hi = a, b
+    top = max(wd)
+    d = lo
+    for _ in range(25):  # veckodagsvikterna tillämpas genom att dra om dagar som inte "godkänns"
+        d = lo + timedelta(days=rng.randint(0, max(0, (hi - lo).days)))
+        if rng.random() * top <= wd[d.weekday()]:
+            break
+    if ctx.column.kind != "datetime":
+        return d
+    hour = _weighted(rng, list(range(24)), hours) if hours else rng.randint(0, 23)
+    return datetime.combine(d, time(hour, rng.randint(0, 59), rng.randint(0, 59)))
+
+
 # ---------------------------------------------------------------- relationer och uttryck
 
 @register("parent.lookup", "Kopiera värde från relaterad tabell", "Relation", [

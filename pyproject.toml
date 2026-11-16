@@ -28,7 +28,7 @@ build-backend = "setuptools.build_meta"
 packages = ["dummyfiller"]
 
 [tool.setuptools.package-data]
-dummyfiller = ["diagram/*.html"]
+dummyfiller = ["diagram/*.html", "mapper/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

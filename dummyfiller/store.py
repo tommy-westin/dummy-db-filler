@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS version (
 );
 CREATE INDEX IF NOT EXISTS ix_version_project ON version(project_id, id);
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    content TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS library_item (
     kind TEXT NOT NULL,
     key TEXT NOT NULL,
@@ -212,6 +217,28 @@ def lib_delete(kind: str, key: str) -> None:
 def lib_revision() -> str:
     """Ändras varje gång biblioteket ändras (även från en annan flik eller process)."""
     return get_setting("library_rev") or "0"
+
+
+# ---------------------------------------------------------------- logg över läsningar från produktion (se learn.py)
+
+def audit_add(entry: dict) -> int:
+    with _connect() as conn:
+        cur = conn.execute("INSERT INTO audit(at, content) VALUES (?, ?)", (_now(), json.dumps(entry, ensure_ascii=False, default=str)))
+        return cur.lastrowid
+
+
+def audit_update(audit_id: int, extra: dict) -> None:
+    with _connect() as conn:
+        row = conn.execute("SELECT content FROM audit WHERE id = ?", (audit_id,)).fetchone()
+        if row is not None:
+            conn.execute("UPDATE audit SET content = ? WHERE id = ?",
+                         (json.dumps({**json.loads(row["content"]), **extra}, ensure_ascii=False, default=str), audit_id))
+
+
+def audit_list(limit: int = 50) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT id, at, content FROM audit ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [{"id": r["id"], "at": r["at"], **json.loads(r["content"])} for r in rows]
 
 
 def delete(project_id: int) -> None:
