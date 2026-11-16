@@ -591,6 +591,8 @@ def generate(project: Project, only: list[str] | None = None, max_rows: int | No
     scale  – scenariofaktor som multiplicerar radantalen (inte kodtabeller och kalendrar)
     append – inkrementell körning ovanpå befintlig data, se Append
     """
+    from . import library
+    library.refresh(project)  # egna generatorer och ändrade listor
     if only:
         keys = [t.key for t in project.tables if t.key in set(ancestors(project, only))]
     else:

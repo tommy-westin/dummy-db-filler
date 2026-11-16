@@ -9,7 +9,7 @@ from dummyfiller.model import Project
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = str(ROOT / "dummyfiller" / "app.py")
-PAGES = ["1. Källa", "2. Diagram", "3. Tabeller och relationer", "4. Kolumner", "5. Värdelistor", "6. Generera"]
+PAGES = ["1. Källa", "2. Diagram", "3. Tabeller och relationer", "4. Kolumner", "5. Värdelistor", "6. Generatorer", "7. Generera"]
 
 
 def _project() -> Project:
@@ -34,7 +34,7 @@ def test_pages_render_empty_and_loaded():
 def test_generate_flow():
     at = AppTest.from_file(APP, default_timeout=60)
     at.session_state["project"] = _project()
-    at.session_state["page"] = PAGES[5]
+    at.session_state["page"] = PAGES[6]
     at.run()
     next(b for b in at.button if b.label.startswith("Generera")).click().run()
     assert not at.exception
@@ -82,7 +82,7 @@ def test_new_features_in_ui():
     assert not at.exception
     assert any("COUNT_BIG" in c.value for c in at.code)  # profilskriptet visas
 
-    at.session_state["page"] = PAGES[5]
+    at.session_state["page"] = PAGES[6]
     at.run()
     next(s for s in at.selectbox if s.label.startswith("Scenario")).select("liten").run()
     next(b for b in at.button if b.label.startswith("Generera")).click().run()
@@ -191,3 +191,59 @@ def test_autosave_survives_reload():
 
     next(b for b in reloaded.button if b.label == "➕ Nytt").click().run()
     assert not reloaded.exception and len(store.list_projects()) == 2
+
+
+def test_generators_page():
+    """Sidan Generatorer: bygg en uppslagstabell genom att klistra in, spara, använd på en kolumn; förinställning; inbyggda listor."""
+    from dummyfiller import library
+
+    project = _project()
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.session_state["project"] = project
+    at.session_state["page"] = PAGES[5]
+    at.run()
+    assert not at.exception
+
+    next(x for x in at.text_area if x.label.startswith("… eller klistra in")).input(
+        "Kod;Benämning;Förvaltning;Vikt\n11000;Ekonomienheten;Regionstaben;1\n22000;Hälsocentralen Brunflo;HSF;3")
+    next(b for b in at.button if b.label == "Använd som tabell").click().run()
+    assert not at.exception and at.session_state["lib_draft"]["weight"] == "Vikt"
+    assert any(len(d.value) for d in at.dataframe)  # förhandsgranskningen visas
+    next(x for x in at.text_input if x.label == "Namn").input("JH: Ansvar")
+    next(x for x in at.text_input if x.label == "Namnmönster").input("*ansvar*")
+    next(b for b in at.button if b.label == "💾 Spara generatorn").click().run()
+    assert not at.exception
+    gens = library.custom_generators()
+    assert list(gens) == ["egen.jh_ansvar"] and len(gens["egen.jh_ansvar"]["rows"]) == 2
+    from dummyfiller import rules
+    assert rules.load_rules()[0]["generator"] == "egen.jh_ansvar"
+
+    at.session_state["page"] = PAGES[3]  # generatorn finns i listan på kolumnsidan
+    at.session_state["cur_table"] = "dbo.Patient"
+    at.session_state["cur_col"] = "Ort"
+    at.run()
+    next(s for s in at.selectbox if s.label == "Generator").select("Egna: JH: Ansvar").run()
+    assert not at.exception
+    assert project.table("dbo.Patient").column("Ort").generator == "egen.jh_ansvar"
+    assert "egen.jh_ansvar" in at.session_state["project"].custom_generators  # projektet har en kopia
+
+    at.session_state["page"] = PAGES[5]
+    at.session_state["lib_cur"] = "__ny__"
+    at.session_state["pickver_lib_cur"] = 99
+    at.run()
+    next(r for r in at.radio if r.label == "Slag").set_value("preset").run()
+    next(s for s in at.selectbox if s.label == "Bygger på").select("Nycklar: Mönster").run()
+    next(x for x in at.text_input if x.label == "Mall").input("LF-{seq:06}")
+    next(x for x in at.text_input if x.label == "Namn").input("JH: Fakturanummer")
+    next(b for b in at.button if b.label == "💾 Spara generatorn").click().run()
+    assert not at.exception and library.custom_generators()["egen.jh_fakturanummer"]["params"]["template"] == "LF-{seq:06}"
+
+    at.run()
+    assert not at.exception
+    assert any(s.label == "Lista" for s in at.selectbox)  # fliken Inbyggda listor
+    library.save_list("region.activities", [["100", "Primärvård", 1]])
+    at.session_state["blt_group"] = "Ekonomi"
+    at.run()
+    next(s for s in at.selectbox if s.label == "Lista").select_index(2).run()  # Kontoplan, Ansvar, Verksamheter
+    assert not at.exception
+    assert any(b.label == "↩️ Återställ originalet" for b in at.button)

@@ -44,6 +44,7 @@ class GenSpec:
 
 
 REGISTRY: dict[str, GenSpec] = {}
+LIST_REVISION = 0  # ökas när de inbyggda listorna ändras (se library.py), så att cachar byggs om
 
 
 def register(key: str, label: str, group: str, params: list[Param] | None = None, help: str = ""):

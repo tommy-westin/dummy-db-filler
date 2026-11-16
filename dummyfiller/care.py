@@ -151,7 +151,7 @@ def _norm_code(code) -> str:
 def _codes(ctx, kind: str, builtin: list) -> tuple[list, list]:
     """(koder, kumulativa vikter). Ett inläst kodverk läggs till de inbyggda exemplen; vanliga koder förblir vanliga."""
     book = ctx.project.codebooks.get(kind)
-    key = (kind, id(book), len(book) if book else 0)
+    key = (kind, id(book), len(book) if book else 0, _g.LIST_REVISION)
     hit = _CODE_CACHE.get(key)
     if hit is None:
         items = list(builtin)
@@ -286,8 +286,9 @@ def drug(ctx, group=""):
         if ctx.table.category != "reference":
             lat, _ = latent_diagnosis(ctx)
             wanted = DIAG_DRUGS.get(lat[0]) if lat is not None else None
-            if wanted and ctx.rng.random() < 0.75:
-                d = ctx.rng.choice([x for x in DRUGS if x[0] in wanted])
+            fitting = [x for x in DRUGS if x[0] in wanted] if wanted else []
+            if fitting and ctx.rng.random() < 0.75:
+                d = ctx.rng.choice(fitting)
         d = d or _pick(ctx, "drug", DRUGS)
         return {"atc": d[0], "name": d[1], "form": d[2], "strength": ctx.rng.choice(d[3])}
     return ctx.entity("drug:" + (group or ""), build)
@@ -302,7 +303,7 @@ def lab(ctx, group=""):
             wanted = DIAG_LABS.get(lat[0]) if lat is not None else None
             if wanted and rng.random() < 0.6:
                 name, bias = rng.choice(wanted)
-                pick = next(x for x in LABS if x[0] == name)
+                pick = next((x for x in LABS if x[0] == name), None)
         if pick is None:
             pick = LABS[(ctx.index + ctx.offset) % len(LABS)] if ctx.table.category == "reference" else _weighted(rng, LABS, [x[-1] for x in LABS])
         name, unit, lo, hi, dec, _ = pick

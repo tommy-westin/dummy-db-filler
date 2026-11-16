@@ -26,8 +26,9 @@ och tandvård.
 | 2. Diagram | Se och redigera allt i ett tabelldiagram: flytta tabeller, dra pilar mellan kolumner för att skapa relationer, godta föreslagna relationer och ändra tabeller och kolumner i sidopanelen. |
 | 3. Tabeller och relationer | Kategorisera tabeller, ange antal rader eller barn per förälder, skapa egna tabeller, lägg till eller föreslå relationer, se relationsdiagrammet. |
 | 4. Kolumner | Granska förslaget per kolumn, byt generator, finjustera parametrar och se en förhandsgranskning direkt. Ställ in historik (SCD2) och spara egna regler. |
-| 5. Värdelistor | Läs in exempelfiler, hela kodverk, testpersonnummer och profil från produktion. Hantera egna regler. |
-| 6. Generera | Välj scenario, ny eller inkrementell körning och eventuell smutsig data. Granska datan och kvalitetsrapporten och skriv till databas, CSV, Parquet eller SQL-skript. |
+| 5. Värdelistor | Läs in exempelfiler, hela kodverk, testpersonnummer och profil från produktion. |
+| 6. Generatorer | Bygg egna generatorer (uppslagstabeller och förinställningar), ersätt de inbyggda listorna med regionens riktiga koder, hantera regler och dela biblioteket med teamet. |
+| 7. Generera | Välj scenario, ny eller inkrementell körning och eventuell smutsig data. Granska datan och kvalitetsrapporten och skriv till databas, CSV, Parquet eller SQL-skript. |
 
 Allt du gör sparas automatiskt i en lokal SQLite-databas, `data/dummyfiller.db` i repot, så att arbetet finns
 kvar när sidan laddas om eller appen startas om. I sidopanelen byter du projekt, skapar nya eller kopierar ett
@@ -79,7 +80,7 @@ Diagrammet är en liten HTML/JavaScript-komponent (`dummyfiller/diagram/index.ht
 - **Barn per förälder.** Ange t.ex. 1–5 på en relation, så följer tabellens radantal av föräldern (fakturarader per
   faktura, diagnoser per vårdkontakt). Detaljtabeller får detta som utgångsvärde.
 - **Scenarier.** `liten`, `mellan` och `stor` multiplicerar radantalen (inte kodtabeller och kalendrar). Egna
-  scenarier läggs till under steg 6.
+  scenarier läggs till under steg 7.
 - **Styrda relationer.** När en kodkolumn pekar på en kodtabell väljs föräldern utifrån kolumnens generator, så
   att t.ex. diagnosen passar patienten.
 
@@ -116,6 +117,23 @@ Diagrammet är en liten HTML/JavaScript-komponent (`dummyfiller/diagram/index.ht
 | Kopiera värde från relaterad tabell | Denormaliserade kolumner, t.ex. leverantörsnamn på en faktura. |
 | Tal | Intervall med jämn, normal eller skev fördelning. |
 | Valfri Faker-metod | Allt som biblioteket Faker kan generera. |
+
+### Egna generatorer och regionens egna koder (steg 6)
+
+- **Uppslagstabell:** klistra in eller läs in en tabell, t.ex. regionens ansvarskoder med benämning och förvaltning.
+  En kolumn som använder generatorn väljer ett fält; kolumner på samma rad hämtar från samma tabellrad, och en
+  viktkolumn styr hur vanlig varje rad är. I kodtabeller delas raderna ut i ordning.
+- **Förinställning:** en befintlig generator med sparade inställningar, t.ex. `JH: Fakturanummer` = mönstret
+  `LF-{seq:06}`. Ändrar du förinställningen ändras alla kolumner som använder den.
+- **Inbyggda listor:** kontoplan, ansvar, verksamheter, befattningar och löner, tandvårdsåtgärder, diagnoser,
+  läkemedel, orter och de förvalda värdelistorna kan redigeras, ersättas från fil och återställas till originalet.
+- **Regler:** "kolumner som heter `*ansvar*` ska använda JH: Ansvar" kan skapas direkt när en generator sparas.
+- **Dela med teamet:** exportera biblioteket (generatorer, listor och regler) till en YAML-fil och läs in den hos
+  kollegorna, eller använd den från kommandoraden med `--bibliotek`.
+
+Biblioteket är gemensamt för alla projekt och sparas i den lokala databasen. Ett projekt som använder en egen
+generator får en kopia av den, så att projektet fungerar även hos någon som saknar generatorn. Egna generatorer
+syns i generatorlistan under **Egna**.
 
 ### Vård
 
@@ -158,6 +176,9 @@ python -m dummyfiller generate projekt/vard.yaml --target db --empty-first
 python -m dummyfiller generate projekt/vard.yaml --target db --append --since 2026-11-14 --fraction 5
 python -m dummyfiller profile-sql projekt/vard.yaml --out profil.sql
 python -m dummyfiller apply-profile projekt/vard.yaml resultat.csv --factor 0.01
+python -m dummyfiller export-bibliotek teamets_bibliotek.yaml
+python -m dummyfiller import-bibliotek teamets_bibliotek.yaml
+python -m dummyfiller generate projekt/vard.yaml --target csv --bibliotek teamets_bibliotek.yaml
 ```
 
 Anslutningen tas från projektfilen (eller `--url`). Lösenord för SQL-inloggning läses från miljövariabeln
@@ -194,6 +215,7 @@ Anslutningen tas från projektfilen (eller `--url`). Lösenord för SQL-inloggni
 | `dummyfiller/prodprofile.py`, `rules.py` | Profil från produktion och egna regler |
 | `dummyfiller/app.py`, `__main__.py` | Webbgränssnittet (Streamlit) och kommandoraden |
 | `dummyfiller/store.py` | Automatisk sparning och versionshistorik i SQLite |
+| `dummyfiller/library.py` | Generatorbiblioteket: egna generatorer, ändrade inbyggda listor, export och import |
 | `dummyfiller/diagram/index.html`, `edit.py` | Tabelldiagrammet och redigering av struktur (byta namn, koppla, placera) |
 
 En ny generator läggs till med dekoratorn `@register(...)` i `generators.py`; parameterlistan blir

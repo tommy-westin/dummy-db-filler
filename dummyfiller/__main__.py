@@ -51,6 +51,9 @@ def cmd_generate(a) -> int:
     from .model import Project
 
     project = Project.load(a.project)
+    if a.bibliotek:
+        from . import library
+        library.use_file(a.bibliotek)
     if a.seed is not None:
         project.seed = a.seed
     scale = 1.0
@@ -138,6 +141,12 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--tables", help="vid --append: kommaseparerade tabeller som får nya rader (annars transaktionstabeller)")
     g.add_argument("--since", help="vid --append: nya rader får datum från och med ÅÅÅÅ-MM-DD (annars i dag)")
     g.add_argument("--fraction", type=float, default=5.0, help="vid --append: andel av tabellens radantal i procent")
+    g.add_argument("--bibliotek", help="generatorbibliotek (YAML) att använda utöver det lokala, t.ex. teamets gemensamma fil")
+
+    ib = sp.add_parser("import-bibliotek", help="läs in ett generatorbibliotek (YAML) i det lokala biblioteket")
+    ib.add_argument("fil")
+    eb = sp.add_parser("export-bibliotek", help="skriv det lokala generatorbiblioteket till en YAML-fil")
+    eb.add_argument("fil")
 
     ps = sp.add_parser("profile-sql", help="skapa SQL-skriptet för profil från produktion (endast aggregat)")
     ps.add_argument("project")
@@ -154,6 +163,15 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     if a.cmd == "ui":
         return run_ui(a.port)
+    if a.cmd in ("import-bibliotek", "export-bibliotek"):
+        from . import library
+        if a.cmd == "export-bibliotek":
+            Path(a.fil).write_text(library.export_yaml(), encoding="utf-8")
+            print(f"Biblioteket är skrivet till {a.fil}")
+        else:
+            n = library.import_yaml(Path(a.fil).read_text(encoding="utf-8"))
+            print("Inläst: " + ", ".join(f"{v} {k}" for k, v in n.items()))
+        return 0
     return {"generate": cmd_generate, "profile-sql": cmd_profile_sql, "apply-profile": cmd_apply_profile}[a.cmd](a)
 
 

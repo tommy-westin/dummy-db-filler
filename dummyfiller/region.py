@@ -163,7 +163,9 @@ def activity(ctx, group=""):
             code = ("400" if adm == "Folktandvården" else "100" if name.startswith("Hälsocentralen") else "300" if "psykiatri" in name
                     else "200" if adm.startswith("Hälso-") else "950" if adm == "Regionstaben" else "800" if name == "Kollektivtrafik" else "700")
             if ctx.rng.random() < 0.85:
-                return next(a for a in ACTIVITIES if a[0] == code)
+                hit = next((a for a in ACTIVITIES if a[0] == code), None)
+                if hit is not None:
+                    return hit
         return _pick(ctx, ACTIVITIES)
     return ctx.entity("activity:" + (group or ""), build)
 
@@ -194,7 +196,7 @@ def dental(ctx, group=""):
             chosen = set(rng.sample(pool, min(n, len(pool))))
             surface = "".join(s for s in pool if s in chosen)
         return {"code": code, "text": text, "price": round(rng.uniform(lo, hi) / 5) * 5, "tooth": tooth, "surface": surface,
-                "diag": diag, "diag_text": _DIAG_TEXT[diag]}
+                "diag": diag, "diag_text": _DIAG_TEXT.get(diag, "")}
     return ctx.entity("dental:" + (group or ""), build)
 
 
@@ -312,12 +314,21 @@ def gen_dental_clinic(ctx, p):
 
 
 # generatorer vars värde kan styra vilken rad i en kodtabell som en främmande nyckel pekar på
-GUIDED = ("care.", "finance.account_code", "finance.cost_center_code", "finance.activity_code", "dental.procedure_code",
+GUIDED = ("egen.", "care.", "finance.account_code", "finance.cost_center_code", "finance.activity_code", "dental.procedure_code",
           "dental.diagnosis_code", "hr.title")
 # kodtabellernas storlek per generatorprefix
-SIZES = {"finance.account": len(ACCOUNTS), "finance.cost_center": len(COST_CENTERS), "finance.administration": len(COST_CENTERS),
-         "finance.activity": len(ACTIVITIES), "hr.": len(TITLES), "dental.clinic": len(_FTV), "dental.diagnosis": len(DENTAL_DIAGNOSES),
-         "dental.": len(DENTAL_PROCEDURES)}
+def sizes() -> dict[str, int]:
+    """Kodtabellernas storlek per generatorprefix (listorna kan ha ändrats i biblioteket)."""
+    return {"finance.account": len(ACCOUNTS), "finance.cost_center": len(COST_CENTERS), "finance.administration": len(COST_CENTERS),
+            "finance.activity": len(ACTIVITIES), "hr.": len(TITLES), "dental.clinic": len(_FTV), "dental.diagnosis": len(DENTAL_DIAGNOSES),
+            "dental.": len(DENTAL_PROCEDURES)}
+
+
+def rebuild() -> None:
+    """Bygger om det som härleds ur listorna efter en ändring i biblioteket."""
+    _DIAG_TEXT.clear()
+    _DIAG_TEXT.update({d[0]: d[1] for d in DENTAL_DIAGNOSES})
+
 
 vocab.PRESETS.update(REGION_PRESETS)
 _g._build_labels()

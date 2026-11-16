@@ -9,13 +9,15 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:  # så att paketet hittas även utan installation
     sys.path.insert(0, str(ROOT))
 
+import copy  # noqa: E402
+
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 import streamlit.components.v1 as components  # noqa: E402
 
 from datetime import date, timedelta  # noqa: E402
 
-from dummyfiller import care, dbio, edit, export, prodprofile, quality, rules, store, valuelists  # noqa: E402
+from dummyfiller import care, dbio, edit, export, library, prodprofile, quality, rules, store, valuelists  # noqa: E402
 from dummyfiller.ddl import parse_ddl  # noqa: E402
 from dummyfiller.dirty import KINDS as DIRTY_KINDS  # noqa: E402
 from dummyfiller.engine import estimated_rows, generate, load_order  # noqa: E402
@@ -26,7 +28,7 @@ from dummyfiller.model import CATEGORIES, DISTRIBUTIONS, Column, ForeignKey, Pro
 
 st.set_page_config(page_title="Dummyfiller", page_icon="🧪", layout="wide")
 ss = st.session_state
-PAGES = ["1. Källa", "2. Diagram", "3. Tabeller och relationer", "4. Kolumner", "5. Värdelistor", "6. Generera"]
+PAGES = ["1. Källa", "2. Diagram", "3. Tabeller och relationer", "4. Kolumner", "5. Värdelistor", "6. Generatorer", "7. Generera"]
 CAT_LABELS = list(CATEGORIES.values())
 CAT_BY_LABEL = {v: k for k, v in CATEGORIES.items()}
 DIST_LABELS = list(DISTRIBUTIONS.values())
@@ -91,6 +93,8 @@ if not ss.get("_linked"):  # direktlänk: http://localhost:8501/?projekt=projekt
 if "project" not in ss:  # länken gick inte att öppna
     open_last_project()
 project: Project = ss.project
+library.refresh(project)
+GEN_LABELS = [label_of(k) for k in REGISTRY if not k.startswith(library.PREFIX + "__")]
 
 
 # ---------------------------------------------------------------- hjälpfunktioner
@@ -478,8 +482,12 @@ def generator_settings(t: Table, col: Column):
     """Generator, parametrar och andel NULL för en kolumn. Ändringar gäller direkt."""
     labels = GEN_LABELS
     cur_label = label_of(col.generator) if col.generator in REGISTRY else labels[0]
+    if col.generator.startswith(library.PREFIX) and col.generator not in REGISTRY:
+        st.warning(f"Generatorn '{col.generator}' finns inte längre. Välj en annan, eller läs in den under 6. Generatorer.")
+    elif col.generator.startswith(library.PREFIX) and library.origin(col.generator):
+        st.info("Den egna generatorn finns inte i ditt bibliotek, men projektet har en kopia av den. Lägg till den under 6. Generatorer.")
     picked = st.selectbox("Generator", labels, index=labels.index(cur_label), key=f"gen_{t.key}_{col.name}_{ss.ver}",
-                          help="Skriv i rutan för att söka, t.ex. 'datum', 'konto' eller 'diagnos'.")
+                          help="Skriv i rutan för att söka, t.ex. 'datum', 'konto' eller 'diagnos'. Saknas något? Bygg en egen generator under 6. Generatorer.")
     if LABEL_TO_KEY[picked] != col.generator:
         set_generator(t, col, LABEL_TO_KEY[picked])
         changed()
@@ -1336,25 +1344,349 @@ def tab_rules():
 
 def page_lists():
     st.header("5. Värdelistor – styr datan med egna exempel")
-    t1, t2, t3, t4 = st.tabs(["Värdelistor", "Kodverk (vård)", "Profil från produktion", "Egna regler"])
+    t1, t2, t3 = st.tabs(["Värdelistor", "Kodverk (vård)", "Profil från produktion"])
     with t1:
         tab_value_lists()
     with t2:
         tab_codebooks()
     with t3:
         tab_profile()
-    with t4:
+    st.caption("Egna generatorer, regionens egna koder och regler för kolumnnamn hanterar du under **6. Generatorer**.")
+
+
+# ---------------------------------------------------------------- 6. Generatorer
+
+KIND_LABELS = {"table": "Uppslagstabell (värden som hör ihop radvis)", "preset": "Förinställning av en befintlig generator"}
+NO_WEIGHT = "(ingen – alla rader lika vanliga)"
+NEW_GEN = "__ny__"
+
+
+def df_rows(df: pd.DataFrame) -> list[list]:
+    """Rader från en tabell som vanliga Python-värden (tomma celler blir None)."""
+    out = []
+    for r in df.itertuples(index=False):
+        row = []
+        for v in r:
+            if v is None or (not isinstance(v, (list, str)) and pd.isna(v)):
+                row.append(None)
+            else:
+                row.append(v.item() if hasattr(v, "item") else v)
+        out.append(row)
+    return out
+
+
+def read_table(name: str, raw: bytes | str) -> pd.DataFrame:
+    """CSV, tabbseparerad text (t.ex. inklistrad från Excel) eller Excel-fil till en tabell med texter."""
+    import io
+    if name.lower().endswith(".xlsx"):
+        return pd.read_excel(io.BytesIO(raw), dtype=str).fillna("")
+    text = valuelists.decode(raw) if isinstance(raw, bytes) else raw
+    return pd.read_csv(io.StringIO(text.strip()), sep=None, engine="python", dtype=str).fillna("")
+
+
+def new_draft() -> dict:
+    return {"key": None, "name": "", "kind": "table", "description": "", "columns": ["Kod", "Benämning", "Vikt"], "weight": "Vikt",
+            "rows": [["", "", 1]], "base": "pattern", "params": {}}
+
+
+def preset_params(spec, cur: dict, kp: str) -> dict:
+    """Formulär för en förinställnings parametrar. Parametrar som beror på tabellen ställs in per kolumn."""
+    out = {}
+    skipped = []
+    for p in spec.params:
+        v = cur.get(p.name, p.default)
+        k, h = f"{kp}_{p.name}", p.help or None
+        if p.type in library.CONTEXT_TYPES or p.name == "group":
+            skipped.append(p.label)
+        elif p.type == "int":
+            out[p.name] = int(st.number_input(p.label, value=int(v), step=1, key=k, help=h))
+        elif p.type == "float":
+            out[p.name] = float(st.number_input(p.label, value=float(v), key=k, help=h))
+        elif p.type == "bool":
+            out[p.name] = st.checkbox(p.label, bool(v), key=k, help=h)
+        elif p.type == "select":
+            opts = list(p.options or [])
+            out[p.name] = st.selectbox(p.label, opts, index=opts.index(v) if v in opts else 0, key=k, help=h)
+        elif p.type == "text":
+            out[p.name] = st.text_area(p.label, str(v), height=150, key=k, help=h)
+        else:
+            out[p.name] = st.text_input(p.label, str(v), key=k, help=h)
+    if skipped:
+        st.caption("Ställs in per kolumn: " + ", ".join(skipped) + ".")
+    return out
+
+
+def gen_editor(sel: str):
+    gens = library.custom_generators()
+    if ss.get("lib_draft_for") != sel:
+        ss.lib_draft = copy.deepcopy(gens[sel]) if sel in gens else new_draft()
+        ss.lib_draft_for = sel
+        ss.lib_dv = ss.get("lib_dv", 0) + 1
+    d = ss.lib_draft
+    kp = f"lib_{sel}_{ss.lib_dv}"
+    d["name"] = st.text_input("Namn", d["name"], key=f"{kp}_name", placeholder="t.ex. JH: Ansvar",
+                              help="Visas i generatorlistan under 'Egna'. Börja gärna med JH: så att regionens generatorer hålls ihop.")
+    d["description"] = st.text_input("Beskrivning (valfri)", d.get("description") or "", key=f"{kp}_desc")
+    kinds = list(KIND_LABELS)
+    d["kind"] = st.radio("Slag", kinds, index=kinds.index(d.get("kind", "table")), format_func=KIND_LABELS.get, key=f"{kp}_kind", horizontal=True)
+
+    edited = None
+    if d["kind"] == "table":
+        st.caption("Varje rad är en uppsättning värden som hör ihop, t.ex. ansvarskod, benämning och förvaltning. En kolumn som använder "
+                   "generatorn väljer ett fält; kolumner på samma rad får värden från samma tabellrad. En viktkolumn styr hur vanlig varje rad är.")
+        with st.expander("📥 Läs in från fil eller klistra in", expanded=not any(any(v not in (None, "", 1) for v in r) for r in d["rows"])):
+            f = st.file_uploader("CSV-, text- eller Excel-fil", type=["csv", "txt", "tsv", "xlsx"], key=f"{kp}_file")
+            pasted = st.text_area("… eller klistra in (CSV, eller kopierat direkt från Excel)", key=f"{kp}_paste", height=110,
+                                  placeholder="Kod;Benämning;Förvaltning\n11000;Ekonomienheten;Regionstaben")
+            if st.button("Använd som tabell", key=f"{kp}_load"):
+                try:
+                    df = read_table(f.name, f.getvalue()) if f is not None else read_table("inklistrat.csv", pasted)
+                    if df.empty or not len(df.columns):
+                        raise ValueError("hittade inga rader")
+                    d["columns"] = [str(c).strip() for c in df.columns]
+                    d["rows"] = df_rows(df)
+                    d["weight"] = next((c for c in d["columns"] if c.lower() in ("vikt", "weight", "andel")), "")
+                    ss.lib_dv += 1
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Kunde inte läsa tabellen: {e}")
+        base = pd.DataFrame(d["rows"], columns=d["columns"]) if d["columns"] else pd.DataFrame()
+        edited = st.data_editor(base, num_rows="dynamic", hide_index=True, width="stretch", key=f"{kp}_tbl")
+        a, b, c = st.columns([1.2, 0.8, 1.6])
+        newcol = a.text_input("Ny kolumn", key=f"{kp}_newcol", placeholder="Kolumnnamn", label_visibility="collapsed")
+        if b.button("➕ Kolumn", key=f"{kp}_addcol") and newcol.strip() and newcol.strip() not in d["columns"]:
+            d["rows"] = [r + [None] for r in df_rows(edited)]
+            d["columns"] = list(edited.columns) + [newcol.strip()]
+            ss.lib_dv += 1
+            st.rerun()
+        drop = c.selectbox("Ta bort kolumn", ["(ta bort kolumn …)"] + list(edited.columns), key=f"{kp}_dropcol", label_visibility="collapsed")
+        if drop != "(ta bort kolumn …)":
+            i = list(edited.columns).index(drop)
+            d["rows"] = [r[:i] + r[i + 1:] for r in df_rows(edited)]
+            d["columns"] = [x for x in edited.columns if x != drop]
+            d["weight"] = "" if d.get("weight") == drop else d.get("weight")
+            ss.lib_dv += 1
+            st.rerun()
+        wopts = [NO_WEIGHT] + list(edited.columns)
+        w = st.selectbox("Viktkolumn", wopts, index=wopts.index(d["weight"]) if d.get("weight") in wopts else 0, key=f"{kp}_weight",
+                         help="Tal som anger hur vanlig raden är. Vikt 0 betyder att raden bara används i kodtabeller.")
+        d["weight"] = "" if w == NO_WEIGHT else w
+        current = {**d, "columns": [str(x) for x in edited.columns], "rows": df_rows(edited)}
+    else:
+        bases = [k for k in REGISTRY if not k.startswith(library.PREFIX) and k not in ("null",)]
+        blabels = [label_of(k) for k in bases]
+        cur = d.get("base") if d.get("base") in bases else "pattern"
+        picked = st.selectbox("Bygger på", blabels, index=blabels.index(label_of(cur)), key=f"{kp}_base",
+                              help="Välj den generator som ska förinställas. Inställningarna nedan sparas i den egna generatorn.")
+        base = bases[blabels.index(picked)]
+        if base != d.get("base"):
+            d["base"], d["params"] = base, {}
+        spec = REGISTRY[base]
+        if spec.help:
+            st.caption(spec.help)
+        d["params"] = preset_params(spec, {**defaults(base), **(d.get("params") or {})}, f"{kp}_{base}")
+        current = dict(d)
+
+    st.markdown("**Förhandsgranskning**")
+    try:
+        cols, rows, warns = library.preview(current, 8, project.locale)
+        if cols:
+            st.dataframe(pd.DataFrame([[str(v) if v is not None else None for v in r] for r in rows], columns=cols), hide_index=True, width="stretch")
+        for w in warns:
+            st.warning(w)
+    except Exception as e:
+        st.error(f"Förhandsgranskningen misslyckades: {e}")
+
+    fields = library.table_fields(current) if current["kind"] == "table" else []
+    with st.expander("📌 Använd automatiskt för kolumner med visst namn"):
+        st.caption("Skapar en regel: när ett schema läses in får kolumner vars namn matchar mönstret den här generatorn. "
+                   "Namn jämförs utan versaler, understreck och å/ä/ö; * är jokertecken, t.ex. *ansvar eller kst*.")
+        pattern = st.text_input("Namnmönster", key=f"{kp}_rule", placeholder="t.ex. *ansvar")
+        rule_field = st.selectbox("Fält", fields, key=f"{kp}_rulefield") if fields else None
+
+    a, b, _ = st.columns([1, 1, 2])
+    if a.button("💾 Spara generatorn", type="primary", key=f"{kp}_save"):
+        try:
+            if not current["name"].strip():
+                raise ValueError("Ge generatorn ett namn.")
+            if current["kind"] == "table":
+                if not fields:
+                    raise ValueError("Tabellen behöver minst en kolumn utöver viktkolumnen.")
+                if not any(any(v is not None and str(v).strip() for v in r) for r in current["rows"]):
+                    raise ValueError("Tabellen behöver minst en rad.")
+                current = {k: current[k] for k in ("key", "name", "kind", "description", "columns", "weight", "rows")}
+            else:
+                current = {k: current[k] for k in ("key", "name", "kind", "description", "base", "params")}
+            current["name"] = current["name"].strip()
+            if not current.get("key"):
+                current["key"] = library.new_key(current["name"], set(REGISTRY) | set(library.custom_generators()))
+            library.save_generator(current)
+            if pattern.strip():
+                rules.add_rule(pattern.strip().lower(), current["key"], {"field": rule_field} if rule_field else {})
+            ss.lib_draft_for = None
+            select("lib_cur", current["key"])
+            flash("success", f"Generatorn '{current['name']}' är sparad och finns nu i generatorlistan under 'Egna'.")
+            changed()
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+    if sel in gens:
+        used = library.usage(project, sel)
+        with b.popover("🗑️ Ta bort"):
+            st.caption((f"Används av {len(used)} kolumner i det här projektet. De fortsätter att fungera med projektets kopia av generatorn. "
+                        if used else "") + "Generatorn tas bort ur biblioteket.")
+            if st.button("Ta bort generatorn", key=f"{kp}_del"):
+                library.delete_generator(sel)
+                ss.lib_draft_for = None
+                select("lib_cur", NEW_GEN)
+                changed()
+                st.rerun()
+        with st.expander("🎯 Använd på en kolumn i projektet"):
+            if not project.tables:
+                st.caption("Projektet har inga tabeller ännu.")
+            else:
+                tkey = st.selectbox("Tabell", [t.key for t in project.tables], key=f"{kp}_use_t")
+                tt = project.table(tkey)
+                cname = st.selectbox("Kolumn", [c.name for c in tt.columns if not c.computed], key=f"{kp}_use_c_{tkey}")
+                ufield = st.selectbox("Fält", fields, key=f"{kp}_use_f") if fields else None
+                if cname and st.button("Använd", key=f"{kp}_use"):
+                    col = tt.column(cname)
+                    col.generator, col.params = sel, ({"field": ufield} if ufield else {})
+                    col.manual, col.confidence = True, ""
+                    changed()
+                    flash("success", f"{tt.name}.{cname} använder nu '{gens[sel]['name']}'.")
+                    st.rerun()
+
+
+def tab_custom_generators():
+    gens = library.custom_generators()
+    left, right = st.columns([1, 2.4], gap="large")
+    with left:
+        st.write("Bygg egna generatorer av regionens egna koder och mönster. De blir gemensamma för alla projekt och visas i "
+                 "generatorlistan under **Egna**.")
+        options = [NEW_GEN] + sorted(gens, key=lambda k: gens[k]["name"].lower())
+        cur = ss.get("lib_cur") if ss.get("lib_cur") in options else NEW_GEN
+        sel = st.radio("Generatorer", options, index=options.index(cur), key=f"lib_pick_{ss.get('pickver_lib_cur', 0)}",
+                       format_func=lambda k: "➕ Ny generator" if k == NEW_GEN else gens[k]["name"], label_visibility="collapsed")
+        ss.lib_cur = sel
+        if gens:
+            st.caption(" · ".join(f"{gens[k]['name']}: {len(library.usage(project, k))} kolumner" for k in options[1:])
+                       + " i det här projektet")
+        missing = sorted({c.generator for t in project.tables for c in t.columns if c.generator.startswith(library.PREFIX) and library.origin(c.generator)})
+        if missing:
+            st.warning("Projektet använder egna generatorer som saknas i ditt bibliotek (de fungerar ändå tack vare projektets kopia): "
+                       + ", ".join(REGISTRY[k].label if k in REGISTRY else k for k in missing))
+            if st.button("Lägg till dem i mitt bibliotek"):
+                for k in missing:
+                    if k in (project.custom_generators or {}):
+                        library.save_generator(project.custom_generators[k])
+                changed()
+                st.rerun()
+    with right:
+        gen_editor(sel)
+
+
+def tab_builtin_lists():
+    st.write("De inbyggda listorna är påhittade exempel. Här ersätter du dem med regionens riktiga koder och nivåer – ändringen gäller "
+             "i alla projekt och för alla generatorer som använder listan.")
+    keys = [s.key for s in library.LIST_SPECS]
+    groups = list(dict.fromkeys(s.group for s in library.LIST_SPECS))
+    a, b = st.columns([1, 2])
+    group = a.selectbox("Område", groups, key="blt_group")
+    in_group = [k for k in keys if library.SPECS[k].group == group]
+    key = b.selectbox("Lista", in_group, key=f"blt_list_{group}",
+                      format_func=lambda k: library.SPECS[k].label + ("  · ändrad" if library.is_overridden(k) else ""))
+    spec = library.SPECS[key]
+    if spec.help:
+        st.caption(spec.help)
+    rows = library.current_rows(key)
+    st.caption(f"{len(rows)} rader" + (f" (originalet har {len(library.original_rows(key))})" if library.is_overridden(key) else " · original"))
+    bv = ss.get("blt_v", 0)
+    edited = st.data_editor(pd.DataFrame(rows, columns=[c for c, _ in spec.columns]), num_rows="dynamic", hide_index=True, width="stretch",
+                            key=f"blt_{key}_{bv}_{ss.ver}")
+    c1, c2, c3 = st.columns([1, 1, 1.4])
+    if c1.button("💾 Spara ändringarna", type="primary", key=f"blt_save_{key}"):
+        try:
+            library.save_list(key, df_rows(edited))
+            ss.blt_v = bv + 1
+            changed()
+            flash("success", f"'{spec.label}' är sparad.")
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+    if library.is_overridden(key) and c2.button("↩️ Återställ originalet", key=f"blt_reset_{key}"):
+        library.reset_list(key)
+        ss.blt_v = bv + 1
+        changed()
+        st.rerun()
+    c3.download_button("Ladda ner som CSV", edited.to_csv(sep=";", index=False).encode("utf-8-sig"), file_name=f"{spec.label}.csv",
+                       mime="text/csv", key=f"blt_dl_{key}")
+    with st.expander("📥 Ersätt med innehållet i en fil"):
+        st.caption("Kolumnerna läses i ordning: " + ", ".join(c for c, _ in spec.columns) + ". Första raden ska vara rubriker.")
+        f = st.file_uploader("CSV- eller Excel-fil", type=["csv", "txt", "tsv", "xlsx"], key=f"blt_file_{key}_{bv}")
+        if f is not None and st.button("Ersätt listan", key=f"blt_load_{key}"):
+            try:
+                df = read_table(f.name, f.getvalue())
+                library.save_list(key, df_rows(df.iloc[:, :len(spec.columns)]))
+                ss.blt_v = bv + 1
+                changed()
+                flash("success", f"'{spec.label}' har ersatts med {len(df)} rader från {f.name}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Kunde inte läsa filen: {e}")
+
+
+def tab_share():
+    st.write("Exportera biblioteket – egna generatorer, ändrade listor och egna regler – till en fil som teamet kan dela, t.ex. i ett "
+             "gemensamt git-repo. Den som läser in filen får samma generatorer.")
+    include = st.checkbox("Ta med egna regler", True)
+    text = library.export_yaml(include)
+    a, b = st.columns(2)
+    with a:
+        st.download_button("⬇️ Ladda ner biblioteket (YAML)", text.encode("utf-8"), file_name="dummyfiller_bibliotek.yaml", mime="text/yaml")
+        path = st.text_input("… eller spara till fil", "bibliotek/dummyfiller_bibliotek.yaml")
+        if st.button("Spara till filen"):
+            try:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(text, encoding="utf-8")
+                st.success(f"Sparat till {Path(path).resolve()}")
+            except Exception as e:
+                st.error(f"Kunde inte spara: {e}")
+    with b:
+        f = st.file_uploader("Läs in ett bibliotek", type=["yaml", "yml"], key=f"lib_import_{ss.ver}")
+        if f is not None and st.button("Läs in", type="primary"):
+            try:
+                n = library.import_yaml(valuelists.decode(f.getvalue()), include)
+                changed()
+                flash("success", "Inläst: " + ", ".join(f"{v} {k}" for k, v in n.items()) + ". Generatorer och listor med samma namn har ersatts.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Kunde inte läsa biblioteket: {e}")
+    st.caption("Från kommandoraden: `python -m dummyfiller import-bibliotek fil.yaml` läser in, och "
+               "`python -m dummyfiller generate projekt.yaml --bibliotek fil.yaml` använder filen utan att ändra det lokala biblioteket.")
+
+
+def page_generators():
+    st.header("6. Generatorer – bygg och anpassa")
+    t1, t2, t3, t4 = st.tabs(["Egna generatorer", "Inbyggda listor", "Regler", "Dela med teamet"])
+    with t1:
+        tab_custom_generators()
+    with t2:
+        tab_builtin_lists()
+    with t3:
         tab_rules()
+    with t4:
+        tab_share()
 
 
-# ---------------------------------------------------------------- 6. Generera
+# ---------------------------------------------------------------- 7. Generera
 
 LOCALES = ["sv_SE", "en_US", "en_GB", "nb_NO", "da_DK", "fi_FI", "de_DE"]
 MODES = ["Ny datamängd", "Lägg till ny data ovanpå befintlig (inkrementellt)"]
 
 
 def page_generate():
-    st.header("6. Generera och skriv ut")
+    st.header("7. Generera och skriv ut")
     included = [t for t in project.tables if t.include]
     if not included:
         st.info("Det finns inga tabeller att generera.")
@@ -1520,10 +1852,11 @@ def page_generate():
 
 
 {PAGES[0]: page_source, PAGES[1]: page_diagram, PAGES[2]: page_tables, PAGES[3]: page_columns, PAGES[4]: page_lists,
- PAGES[5]: page_generate}[page]()
+ PAGES[5]: page_generators, PAGES[6]: page_generate}[page]()
 
 # automatisk sparning: körs efter varje ändring (en körning som avbryts av st.rerun sparas av körningen som följer)
 ss.project.connection = dict(ss.conn)  # utan lösenord – det ligger bara i sessionen
+library.snapshot_into(ss.project)
 try:
     ss.project_hash = store.save(ss.project_id, ss.project, ss.project_hash)
 except KeyError:  # projektet har tagits bort i en annan flik: spara som nytt

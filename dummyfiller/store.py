@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS version (
 );
 CREATE INDEX IF NOT EXISTS ix_version_project ON version(project_id, id);
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS library_item (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    content TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (kind, key)
+);
 """
 
 
@@ -172,6 +179,39 @@ def load_version(version_id: int) -> Project:
     if row is None:
         raise KeyError(version_id)
     return deserialize(row["content"])
+
+
+# ---------------------------------------------------------------- generatorbiblioteket (se library.py)
+
+def lib_items() -> list[tuple[str, str, object]]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT kind, key, content FROM library_item ORDER BY kind, key").fetchall()
+    return [(r["kind"], r["key"], json.loads(r["content"])) for r in rows]
+
+
+def _bump(conn) -> None:
+    conn.execute("INSERT INTO setting(key, value) VALUES ('library_rev', '1') "
+                 "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)")
+
+
+def lib_put(kind: str, key: str, content) -> None:
+    text = json.dumps(content, ensure_ascii=False, default=str)
+    with _connect() as conn:
+        conn.execute("INSERT INTO library_item(kind, key, content, updated_at) VALUES (?, ?, ?, ?) "
+                     "ON CONFLICT(kind, key) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+                     (kind, key, text, _now()))
+        _bump(conn)
+
+
+def lib_delete(kind: str, key: str) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM library_item WHERE kind = ? AND key = ?", (kind, key))
+        _bump(conn)
+
+
+def lib_revision() -> str:
+    """Ändras varje gång biblioteket ändras (även från en annan flik eller process)."""
+    return get_setting("library_rev") or "0"
 
 
 def delete(project_id: int) -> None:

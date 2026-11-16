@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from datetime import date
 
-from . import care, region, rules, vocab
+from . import care, library, region, rules, vocab
 from .care import ICD_FORMATS
 from .generators import CHOICE_MODES, NOTE_THEMES
 from .model import Column, Project, Table
@@ -216,15 +216,19 @@ def default_rows(table: Table, project: Project | None = None) -> int:
             for prefix, (kind, items) in sizes.items():
                 if c.generator.startswith(prefix):
                     return care.codebook_size(project, kind, items) if project is not None else len(items)
-            for prefix, size in region.SIZES.items():
+            for prefix, size in region.sizes().items():
                 if c.generator.startswith(prefix):
                     return size
+            if (size := library.size_of(c.generator)) is not None:
+                return size
         return 8
     if cat == "location":  # enhetstabeller: en rad per enhet
         for c in table.columns:
             for prefix in ("dental.clinic", "finance.cost_center"):
                 if c.generator.startswith(prefix):
-                    return region.SIZES[prefix]
+                    return region.sizes()[prefix]
+            if (size := library.size_of(c.generator)) is not None:
+                return size
     if cat == "transaction":
         lines = project is not None and any(
             (p := project.table(fk.ref_table)) is not None and p.category == "transaction" and p.key != table.key
